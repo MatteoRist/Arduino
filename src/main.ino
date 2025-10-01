@@ -13,13 +13,17 @@
 #include <Arduino_MKRMEM.h>
 #include <time.h>
 #include <RTCZero.h>
+#include <ArduinoLowPower.h>
 
 // RTC object
 RTCZero rtc;
 
+# define DEBUG true
 // IMPORTANT: Pay attention to the volatile nature of these variables
 volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
+const int _externalPin = 5;
+volatile uint16_t _externalFlag = 0;
 
 // Useful macro to measure elapsed time in milliseconds
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
@@ -38,6 +42,10 @@ void setup() {
   // .arduino15/packages/arduino/hardware/samd/1.8.13/variants/mkrwan1300/variant.h
   pinMode(LORA_RESET, OUTPUT);    // Declare LORA reset pin as output
   digitalWrite(LORA_RESET, LOW);  // Set it to low level to disable the LoRA module
+
+  // setting pin mode and callback
+  pinMode(_externalPin, INPUT_PULLUP);
+  LowPower.attachInterruptWakeup(_externalPin, externalCallback, FALLING);
 
   SerialUSB.begin(9600);
   while (!SerialUSB) {
@@ -91,8 +99,7 @@ void setup() {
     }
   }
 
-  // Activate alarm every 10 seconds starting from 5 seconds from now
-  setPeriodicAlarm(10, 5);
+  
   
   // Turn off the LED, but wait until at least 3 seconds have passed since start
   while (elapsedMilliseconds(t_start_ms) > 3000) { 
@@ -103,82 +110,93 @@ void setup() {
   // Clear _rtcFlag
   _rtcFlag = 0;
   
-  // Activate the interrupt service routine
-  rtc.attachInterrupt(alarmCallback);
+  // Activate alarm every 10 seconds starting from 5 seconds from now
+  LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
+  setPeriodicAlarm(10,5);
+
+  LowPower.sleep();
 }
 
 // -------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------
 void loop() {
   if (_rtcFlag) {
-    // Get current date and time as string
-    char *data_line = getDateTime();
-    
-    // Print to serial monitor
-    SerialUSB.print("Writing to file: ");
-    SerialUSB.println(data_line);
-
-    // Reopen the file in each iteration to append data
-    File file = filesystem.open(filename, WRITE_ONLY | APPEND);
-    if (!file) {
-      SerialUSB.print("Opening file ");
-      SerialUSB.print(filename);
-      SerialUSB.println(" failed for appending. Aborting...");
-      on_exit_with_error_do();
-    }
-
-    // Write data to file
-    int const bytes_to_write = strlen(data_line);
-    int const bytes_written = file.write((void *)data_line, bytes_to_write);
-    if (bytes_to_write != bytes_written) {
-      SerialUSB.print("write() failed with error code ");
-      SerialUSB.println(filesystem.err());
-      SerialUSB.println("Aborting...");
-      on_exit_with_error_do();
-    }
-    
-    // Add newline after each entry for better readability
-    file.write((void *)"\n", 1);
-    
-    // Close the file
-    file.close();
-
+    writeDateToFile();
     // Read and print file contents to monitor
     printFileContents();
 
     // Decrement _rtcFlag
-    _rtcFlag--;
-    if (_rtcFlag) {
-      SerialUSB.println("WARNING: Unattended RTC alarm events!");
-    }
+    _rtcFlag=0;
     
     // Turn off the LED
     digitalWrite(LED_BUILTIN, LOW);
   }
+
+  if(_externalFlag){
+    writeDateToFile();
+    printFileContents();
+    _externalFlag = 0;
+    digitalWrite(LED_BUILTIN, LOW);
+  }
+  if(!DEBUG){
+  LowPower.sleep();
+  }
 }
 
 // -------------------------------------------------------------------------------
-// Read and print file contents to serial monitor
+// Read and print file contents to serial monitor debug function
 // -------------------------------------------------------------------------------
 void printFileContents() {
-  SerialUSB.println("--- File Contents ---");
+  if(DEBUG){
+    SerialUSB.println("--- File Contents ---");
+    
+    File file = filesystem.open(filename, READ_ONLY);
+    if (!file) {
+      SerialUSB.println("Failed to open file for reading");
+      return;
+    }
+
+    // Read and print file contents using read() instead of available()
+    int bytesRead;
+    char buffer[64];
+    while ((bytesRead = file.read(buffer, sizeof(buffer) - 1)) > 0) {
+      buffer[bytesRead] = '\0'; // Null-terminate the string
+      SerialUSB.print(buffer);
+    }
+
+    file.close();
+    SerialUSB.println("\n--- End of File ---");
+  }
+}
+
+
+void writeDateToFile() {
+  // Get current date and time as string
+  char *data_line = getDateTime();
   
-  File file = filesystem.open(filename, READ_ONLY);
+  // Reopen the file in each iteration to append data
+  File file = filesystem.open(filename, WRITE_ONLY | APPEND);
   if (!file) {
-    SerialUSB.println("Failed to open file for reading");
-    return;
+    SerialUSB.print("Opening file ");
+    SerialUSB.print(filename);
+    SerialUSB.println(" failed for appending. Aborting...");
+    on_exit_with_error_do();
+  }
+  // Write data to file
+  int const bytes_to_write = strlen(data_line);
+  int const bytes_written = file.write((void *)data_line, bytes_to_write);
+  if (bytes_to_write != bytes_written) {
+    SerialUSB.print("write() failed with error code ");
+    SerialUSB.println(filesystem.err());
+    SerialUSB.println("Aborting...");
+    on_exit_with_error_do();
   }
   
-  // Read and print file contents using read() instead of available()
-  int bytesRead;
-  char buffer[64];
-  while ((bytesRead = file.read(buffer, sizeof(buffer) - 1)) > 0) {
-    buffer[bytesRead] = '\0'; // Null-terminate the string
-    SerialUSB.print(buffer);
-  }
+  // Add newline after each entry for better readability
+  file.write((void *)"\n", 1);
   
+  // Close the file
   file.close();
-  SerialUSB.println("\n--- End of File ---");
 }
 
 // -------------------------------------------------------------------------------
@@ -265,6 +283,12 @@ void alarmCallback() {
   
   // Reprogram the alarm using the same period
   rtc.setAlarmEpoch(rtc.getEpoch() + _period_sec);
+}
+
+void externalCallback(){
+  _externalFlag++;
+
+  digitalWrite(LED_BUILTIN, HIGH);
 }
 
 // -------------------------------------------------------------------------------
