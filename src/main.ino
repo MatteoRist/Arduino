@@ -18,13 +18,13 @@
 // RTC object
 RTCZero rtc;
 
-# define DEBUG true
+
 // IMPORTANT: Pay attention to the volatile nature of these variables
 volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
 const int _externalPin = 5;
 volatile uint16_t _externalFlag = 0;
-volatile uint16_t _numberOfRTCSignals = 10;
+volatile uint16_t _numberOfRTCSignals = 2;
 
 // Useful macro to measure elapsed time in milliseconds
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
@@ -133,7 +133,6 @@ void setup() {
   // Activate alarm every 10 seconds starting from 5 seconds from now
   LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
   setPeriodicAlarm(5,0);
-
   LowPower.sleep();
 }
 
@@ -158,9 +157,9 @@ void loop() {
     }
   }
   if(_numberOfRTCSignals == 0){
+    delay(500);
     printFileContents();
-    delay(2000);
-    LowPower.deepSleep();
+    while(true){}
   }
   LowPower.sleep();
 }
@@ -204,12 +203,11 @@ void writeDateToFile(const char* typeOfInterruption) {
     on_exit_with_error_do();
   }
   // Write data to file
-  int const bytes_to_write = strlen(data_line) + strlen(typeOfInterruption) + 4; // + " :\n"
   char buffer[64];
   snprintf(buffer, sizeof(buffer), "%s : %s\n", typeOfInterruption, data_line);
 
   int const bytes_written = file.write((void *)buffer, strlen(buffer));
-  if (bytes_to_write != bytes_written) {
+  if (strlen(buffer) != bytes_written) {
     SerialUSB.print("write() failed with error code ");
     SerialUSB.println(filesystem.err());
     SerialUSB.println("Aborting...");
