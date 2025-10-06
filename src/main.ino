@@ -24,6 +24,7 @@ volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
 const int _externalPin = 5;
 volatile uint16_t _externalFlag = 0;
+volatile uint16_t _numberOfRTCSignals = 10;
 
 // Useful macro to measure elapsed time in milliseconds
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
@@ -64,6 +65,25 @@ void setup() {
     on_exit_with_error_do();
   }
 
+  if(res == SPIFFS_ERR_NOT_A_FS) {
+    if(res != SPIFFS_OK) {
+      SerialUSB.println("format() failed with error code ");
+      SerialUSB.println(res); return;
+    }
+    SerialUSB.println("Mounting ...");
+    res = filesystem.mount();
+    if(res != SPIFFS_OK) {
+      SerialUSB.println("mount() failed with error code ");
+      SerialUSB.println(res); return;
+    }
+  }
+
+  SerialUSB.println("Checking ...");
+  res = filesystem.check();
+  if(res != SPIFFS_OK) {
+    SerialUSB.println("check() failed with error code ");
+    SerialUSB.println(res); return;
+  }
   // Create a new file
   // We could use create(), but open() provides more flexibility (flags)
   File file = filesystem.open(filename, CREATE | TRUNCATE);
@@ -112,7 +132,7 @@ void setup() {
   
   // Activate alarm every 10 seconds starting from 5 seconds from now
   LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
-  setPeriodicAlarm(10,5);
+  setPeriodicAlarm(5,0);
 
   LowPower.sleep();
 }
@@ -120,57 +140,58 @@ void setup() {
 // -------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------
 void loop() {
-  if (_rtcFlag) {
-    writeDateToFile();
-    // Read and print file contents to monitor
-    printFileContents();
+  if(_numberOfRTCSignals != 0){
+    if (_rtcFlag) {
+      writeDateToFile("RTC");
 
-    // Decrement _rtcFlag
-    _rtcFlag=0;
-    
-    // Turn off the LED
-    digitalWrite(LED_BUILTIN, LOW);
-  }
+      // Decrement _rtcFlag
+      _rtcFlag=0;
+      _numberOfRTCSignals--;
+      // Turn off the LED
+      digitalWrite(LED_BUILTIN, LOW);
+    }
 
-  if(_externalFlag){
-    writeDateToFile();
-    printFileContents();
-    _externalFlag = 0;
-    digitalWrite(LED_BUILTIN, LOW);
+    if(_externalFlag){
+      writeDateToFile("EXT");
+      _externalFlag = 0;
+      digitalWrite(LED_BUILTIN, LOW);
+    }
   }
-  if(!DEBUG){
+  if(_numberOfRTCSignals == 0){
+    printFileContents();
+    delay(2000);
+    LowPower.deepSleep();
+  }
   LowPower.sleep();
-  }
 }
 
 // -------------------------------------------------------------------------------
 // Read and print file contents to serial monitor debug function
 // -------------------------------------------------------------------------------
 void printFileContents() {
-  if(DEBUG){
-    SerialUSB.println("--- File Contents ---");
-    
-    File file = filesystem.open(filename, READ_ONLY);
-    if (!file) {
-      SerialUSB.println("Failed to open file for reading");
-      return;
-    }
-
-    // Read and print file contents using read() instead of available()
-    int bytesRead;
-    char buffer[64];
-    while ((bytesRead = file.read(buffer, sizeof(buffer) - 1)) > 0) {
-      buffer[bytesRead] = '\0'; // Null-terminate the string
-      SerialUSB.print(buffer);
-    }
-
-    file.close();
-    SerialUSB.println("\n--- End of File ---");
+  SerialUSB.println("--- File Contents ---");
+  
+  File file = filesystem.open(filename, READ_ONLY);
+  if (!file) {
+    SerialUSB.println("Failed to open file for reading");
+    return;
   }
+
+  // Read and print file contents using read() instead of available()
+  int bytesRead;
+  char buffer[64];
+  while ((bytesRead = file.read(buffer, sizeof(buffer) - 1)) > 0) {
+    buffer[bytesRead] = '\0'; // Null-terminate the string
+    SerialUSB.print(buffer);
+  }
+
+  file.close();
+  SerialUSB.println("\n--- End of File ---");
 }
 
 
-void writeDateToFile() {
+
+void writeDateToFile(const char* typeOfInterruption) {
   // Get current date and time as string
   char *data_line = getDateTime();
   
@@ -183,17 +204,17 @@ void writeDateToFile() {
     on_exit_with_error_do();
   }
   // Write data to file
-  int const bytes_to_write = strlen(data_line);
-  int const bytes_written = file.write((void *)data_line, bytes_to_write);
+  int const bytes_to_write = strlen(data_line) + strlen(typeOfInterruption) + 4; // + " :\n"
+  char buffer[64];
+  snprintf(buffer, sizeof(buffer), "%s : %s\n", typeOfInterruption, data_line);
+
+  int const bytes_written = file.write((void *)buffer, strlen(buffer));
   if (bytes_to_write != bytes_written) {
     SerialUSB.print("write() failed with error code ");
     SerialUSB.println(filesystem.err());
     SerialUSB.println("Aborting...");
     on_exit_with_error_do();
   }
-  
-  // Add newline after each entry for better readability
-  file.write((void *)"\n", 1);
   
   // Close the file
   file.close();
