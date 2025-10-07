@@ -28,6 +28,9 @@ volatile uint16_t _numberOfRTCSignals = 10;
 // Useful macro to measure elapsed time in milliseconds
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
 
+// debug mode
+#define DEBUG true
+
 // -------------------------------------------------------------------------------
 // IMPORTANT: We move the flash variable declaration here to adjust
 //            the SPI bus and CS pin of the FLASH
@@ -141,7 +144,11 @@ void loop() {
     }
 
   }else{
+    #if DEBUG
     while(1){;}
+    #else
+    LowPower.deepSleep();
+    #endif
   }
 
   closeSerial();
