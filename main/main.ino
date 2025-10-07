@@ -13,6 +13,7 @@
 #include <Arduino_MKRMEM.h>
 #include <time.h>
 #include <RTCZero.h>
+#include <ArduinoLowPower.h>
 
 // RTC object
 RTCZero rtc;
@@ -20,6 +21,8 @@ RTCZero rtc;
 // IMPORTANT: Pay attention to the volatile nature of these variables
 volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
+const int _externalPin = 5;
+volatile uint16_t _externalFlag = 0;
 volatile uint16_t _numberOfRTCSignals = 10;
 
 // Useful macro to measure elapsed time in milliseconds
@@ -40,10 +43,15 @@ void setup() {
   pinMode(LORA_RESET, OUTPUT);    // Declare LORA reset pin as output
   digitalWrite(LORA_RESET, LOW);  // Set it to low level to disable the LoRA module
 
-  SerialUSB.begin(9600);
-  while (!SerialUSB) {
-    ; // Wait for serial connection
-  }
+  // setting pin mode and callback
+  pinMode(_externalPin, INPUT_PULLUP);
+  LowPower.attachInterruptWakeup(_externalPin, externalCallback, FALLING);
+
+  initSerial();
+  // SerialUSB.begin(9600);
+  // while (!SerialUSB) {
+  //   ; // Wait for serial connection
+  // }
 
   // Initialize FLASH memory
   flash.begin();
@@ -92,20 +100,20 @@ void setup() {
     }
   }
 
-  // Activate alarm every 10 seconds starting from 5 seconds from now
-  setPeriodicAlarm(10, 5);
+  digitalWrite(LED_BUILTIN, LOW);
   
   // Turn off the LED, but wait until at least 3 seconds have passed since start
   while (elapsedMilliseconds(t_start_ms) > 3000) { 
     delay(1); 
   }
-  digitalWrite(LED_BUILTIN, LOW);
   
-  // Clear _rtcFlag
+  // Clear flags
   _rtcFlag = 0;
+  _externalFlag = 0;
   
-  // Activate the interrupt service routine
-  rtc.attachInterrupt(alarmCallback);
+  // Activate alarm every 10 seconds starting from 5 seconds from now
+  LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
+  setPeriodicAlarm(5,1);
 }
 
 // -------------------------------------------------------------------------------
@@ -113,15 +121,48 @@ void setup() {
 void loop() {
   if (_numberOfRTCSignals){
     if (_rtcFlag) {
+      initSerial(); // Reinit serial after wakeup
+
       writeDateToFile("RTC");
 
       printFileContents();
 
       _numberOfRTCSignals--;
     }
+
+    if(_externalFlag){
+      initSerial(); // Reinit serial after wakeup
+
+      writeDateToFile("EXT");
+
+      printFileContents();
+
+      _externalFlag--;
+    }
+
   }else{
     while(1){;}
   }
+
+  closeSerial();
+  LowPower.sleep();
+}
+
+void initSerial() {
+  if (!SerialUSB) {
+    SerialUSB.begin(9600);
+    // Wait for serial connection (with timeout)
+    uint32_t timeout = millis() + 2000;
+    while (!SerialUSB && millis() < timeout) {
+      delay(1);
+    }
+    SerialUSB.println("Serial reinitialized after wakeup");
+  }
+}
+
+void closeSerial() {
+  SerialUSB.end();
+  delay(200); // Give time for USB to disconnect
 }
 
 void writeDateToFile(const char* typeOfInterruption) {
@@ -281,6 +322,12 @@ void alarmCallback() {
   
   // Reprogram the alarm using the same period
   rtc.setAlarmEpoch(rtc.getEpoch() + _period_sec);
+}
+
+void externalCallback(){
+  _externalFlag++;
+
+  digitalWrite(LED_BUILTIN, HIGH);
 }
 
 // -------------------------------------------------------------------------------
