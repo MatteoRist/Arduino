@@ -58,12 +58,13 @@ void setup() {
   SerialUSB.println("Checking filesystem...");
   if (!filesystem.mounted()) {
     SerialUSB.println("Mounting filesystem...");
-    filesystem.mount();
-  }
-  if (res != SPIFFS_OK && res != SPIFFS_ERR_NOT_A_FS) {
-    SerialUSB.println("mount() failed with error code: ");
-    SerialUSB.println(res);
-    on_exit_with_error_do();
+    int res = filesystem.mount();
+
+    if (res != SPIFFS_OK && res != SPIFFS_ERR_NOT_A_FS) {
+      SerialUSB.println("mount() failed with error code: ");
+      SerialUSB.println(res);
+      on_exit_with_error_do();
+    }
   }
 
   // Create a new file
