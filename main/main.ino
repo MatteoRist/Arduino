@@ -30,6 +30,9 @@ volatile uint16_t _numberOfRTCSignals = 10;
 // debug mode
 #define DEBUG true
 
+// the span during which a second physical interruption is considered a bounce
+#define BOUNCE_TIME 200
+
 // -------------------------------------------------------------------------------
 // IMPORTANT: We move the flash variable declaration here to adjust
 //            the SPI bus and CS pin of the FLASH
@@ -115,7 +118,7 @@ void setup() {
   
   // Activate alarm every 10 seconds starting from 5 seconds from now
   LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
-  setPeriodicAlarm(5,1);
+  setPeriodicAlarm(10,1);
 }
 
 // -------------------------------------------------------------------------------
@@ -123,19 +126,22 @@ void setup() {
 void loop() {
   if (_numberOfRTCSignals){
     if (_rtcFlag) {
-      initSerial(); // Reinit serial after wakeup
-
       writeDateToFile("RTC");
 
+      initSerial(); // Reinit serial after wakeup
+
       printFileContents();
+
+      // Decrement _rtcFlag
+      _rtcFlag--;
 
       _numberOfRTCSignals--;
     }
 
     if(_externalFlag){
-      initSerial(); // Reinit serial after wakeup
-
       writeDateToFile("EXT");
+
+      initSerial(); // Reinit serial after wakeup
 
       printFileContents();
 
@@ -211,9 +217,6 @@ void writeDateToFile(const char* typeOfInterruption) {
   // Close the file
   file.close();
   free(data_line);
-
-  // Decrement _rtcFlag
-  _rtcFlag--;
 
   // Turn off the LED
   digitalWrite(LED_BUILTIN, LOW);
@@ -330,11 +333,16 @@ void alarmCallback() {
 }
 
 void externalCallback(){
-  _externalFlag++;
-
-  digitalWrite(LED_BUILTIN, HIGH);
+  static unsigned long lastInterruptTime = 0;
+  unsigned long interruptTime = millis();
+  
+  // If interrupts come faster than BOUNCE_TIME, assume it's a bounce and ignore
+  if (interruptTime - lastInterruptTime > BOUNCE_TIME) {
+    _externalFlag++;
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
+  lastInterruptTime = interruptTime;
 }
-
 // -------------------------------------------------------------------------------
 // Utility to unmount the filesystem and terminate in case of error
 // -------------------------------------------------------------------------------
