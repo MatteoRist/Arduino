@@ -18,7 +18,6 @@
 // RTC object
 RTCZero rtc;
 
-// IMPORTANT: Pay attention to the volatile nature of these variables
 volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
 const int _externalPin = 5;
@@ -51,10 +50,6 @@ void setup() {
   LowPower.attachInterruptWakeup(_externalPin, externalCallback, FALLING);
 
   initSerial();
-  // SerialUSB.begin(9600);
-  // while (!SerialUSB) {
-  //   ; // Wait for serial connection
-  // }
 
   // Initialize FLASH memory
   flash.begin();
@@ -163,7 +158,6 @@ void initSerial() {
     while (!SerialUSB && millis() < timeout) {
       delay(1);
     }
-    SerialUSB.println("Serial reinitialized after wakeup");
   }
 }
 
