@@ -68,6 +68,24 @@ void setup() {
       SerialUSB.println(res);
       on_exit_with_error_do();
     }
+
+    if(res == SPIFFS_ERR_NOT_A_FS){
+      res = filesystem.format();
+      if (res != SPIFFS_OK){
+        SerialUSB.print("format() failed with error code: ");
+        SerialUSB.println(res);
+        on_exit_with_error_do();
+      }
+
+      SerialUSB.println("Mounting filesystem...");
+      res = filesystem.mount();
+
+      if (res != SPIFFS_OK) {
+        SerialUSB.println("mount() failed with error code: ");
+        SerialUSB.println(res);
+        on_exit_with_error_do();
+      }
+    }
   }
 
   // Create a new file
