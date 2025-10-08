@@ -18,16 +18,20 @@
 // RTC object
 RTCZero rtc;
 
-
-// IMPORTANT: Pay attention to the volatile nature of these variables
 volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
 const int _externalPin = 5;
 volatile uint16_t _externalFlag = 0;
-volatile uint16_t _numberOfRTCSignals = 2;
+volatile uint16_t _numberOfRTCSignals = 10;
 
 // Useful macro to measure elapsed time in milliseconds
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
+
+// debug mode
+#define DEBUG true
+
+// the span during which a second physical interruption is considered a bounce
+#define BOUNCE_TIME 200
 
 // -------------------------------------------------------------------------------
 // IMPORTANT: We move the flash variable declaration here to adjust
@@ -48,21 +52,40 @@ void setup() {
   pinMode(_externalPin, INPUT_PULLUP);
   LowPower.attachInterruptWakeup(_externalPin, externalCallback, FALLING);
 
-  SerialUSB.begin(9600);
-  while (!SerialUSB) {
-    ; // Wait for serial connection
-  }
+  initSerial();
 
   // Initialize FLASH memory
   flash.begin();
   
   // Mount the filesystem
-  SerialUSB.println("Mounting filesystem...");
-  int res = filesystem.mount();
-  if (res != SPIFFS_OK && res != SPIFFS_ERR_NOT_A_FS) {
-    SerialUSB.println("mount() failed with error code: ");
-    SerialUSB.println(res);
-    on_exit_with_error_do();
+  SerialUSB.println("Checking filesystem...");
+  if (!filesystem.mounted()) {
+    SerialUSB.println("Mounting filesystem...");
+    int res = filesystem.mount();
+
+    if (res != SPIFFS_OK && res != SPIFFS_ERR_NOT_A_FS) {
+      SerialUSB.println("mount() failed with error code: ");
+      SerialUSB.println(res);
+      on_exit_with_error_do();
+    }
+
+    if(res == SPIFFS_ERR_NOT_A_FS){
+      res = filesystem.format();
+      if (res != SPIFFS_OK){
+        SerialUSB.print("format() failed with error code: ");
+        SerialUSB.println(res);
+        on_exit_with_error_do();
+      }
+
+      SerialUSB.println("Mounting filesystem...");
+      res = filesystem.mount();
+
+      if (res != SPIFFS_OK) {
+        SerialUSB.println("mount() failed with error code: ");
+        SerialUSB.println(res);
+        on_exit_with_error_do();
+      }
+    }
   }
 
   if(res == SPIFFS_ERR_NOT_A_FS) {
@@ -119,49 +142,121 @@ void setup() {
     }
   }
 
-  
+  digitalWrite(LED_BUILTIN, LOW);
   
   // Turn off the LED, but wait until at least 3 seconds have passed since start
   while (elapsedMilliseconds(t_start_ms) > 3000) { 
     delay(1); 
   }
-  digitalWrite(LED_BUILTIN, LOW);
   
-  // Clear _rtcFlag
+  // Clear flags
   _rtcFlag = 0;
+  _externalFlag = 0;
   
   // Activate alarm every 10 seconds starting from 5 seconds from now
   LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
-  setPeriodicAlarm(5,0);
-  LowPower.sleep();
+  setPeriodicAlarm(10,1);
 }
 
 // -------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------
 void loop() {
-  if(_numberOfRTCSignals != 0){
+  if (_numberOfRTCSignals){
     if (_rtcFlag) {
       writeDateToFile("RTC");
 
+      initSerial(); // Reinit serial after wakeup
+
+      printFileContents();
+
       // Decrement _rtcFlag
-      _rtcFlag=0;
+      _rtcFlag--;
+
       _numberOfRTCSignals--;
-      // Turn off the LED
-      digitalWrite(LED_BUILTIN, LOW);
     }
 
     if(_externalFlag){
       writeDateToFile("EXT");
-      _externalFlag = 0;
-      digitalWrite(LED_BUILTIN, LOW);
+
+      initSerial(); // Reinit serial after wakeup
+
+      printFileContents();
+
+      _externalFlag--;
+    }
+
+  }else{
+    #if DEBUG
+    while(1){;}
+    #else
+    LowPower.deepSleep();
+    #endif
+  }
+
+  closeSerial();
+  LowPower.sleep();
+}
+
+void initSerial() {
+  if (!SerialUSB) {
+    SerialUSB.begin(9600);
+    // Wait for serial connection (with timeout)
+    uint32_t timeout = millis() + 2000;
+    while (!SerialUSB && millis() < timeout) {
+      delay(1);
     }
   }
-  if(_numberOfRTCSignals == 0){
-    delay(500);
-    printFileContents();
-    while(true){}
+}
+
+void closeSerial() {
+  SerialUSB.end();
+  delay(200); // Give time for USB to disconnect
+}
+
+void writeDateToFile(const char* typeOfInterruption) {
+  // Get current date and time as string
+  char* dateTime = getDateTime();
+
+  // Create a new string with typeOfInterruption + ": " + dateTime
+  const int bufferSize = strlen(typeOfInterruption) + 2 + strlen(dateTime) + 1; // ": " + null terminator
+  char* data_line = (char*)malloc(bufferSize);
+  if (!data_line) {
+    SerialUSB.println("Memory allocation failed. Aborting...");
+    on_exit_with_error_do();
   }
-  LowPower.sleep();
+  snprintf(data_line, bufferSize, "%s: %s", typeOfInterruption, dateTime);
+
+  // Reopen the file in each iteration to append data
+  File file = filesystem.open(filename, WRITE_ONLY | APPEND);
+  if (!file) {
+    SerialUSB.print("Opening file ");
+    SerialUSB.print(filename);
+    SerialUSB.println(" failed for appending. Aborting...");
+    free(data_line);
+    on_exit_with_error_do();
+  }
+
+  // Write data to file
+  int const bytes_to_write = strlen(data_line);
+  int const bytes_written = file.write((void *)data_line, bytes_to_write);
+  if (bytes_to_write != bytes_written) {
+    SerialUSB.print("write() failed with error code ");
+    SerialUSB.println(filesystem.err());
+    SerialUSB.println("Aborting...");
+    file.close();
+    free(data_line);
+    on_exit_with_error_do();
+  }
+
+  // Add newline after each entry for better readability
+  file.write((void *)"\n", 1);
+
+  // Close the file
+  file.close();
+  free(data_line);
+
+  // Turn off the LED
+  digitalWrite(LED_BUILTIN, LOW);
 }
 
 // -------------------------------------------------------------------------------
@@ -185,7 +280,7 @@ void printFileContents() {
   }
 
   file.close();
-  SerialUSB.println("\n--- End of File ---");
+  SerialUSB.println("--- End of File ---\n");
 }
 
 
@@ -305,11 +400,16 @@ void alarmCallback() {
 }
 
 void externalCallback(){
-  _externalFlag++;
-
-  digitalWrite(LED_BUILTIN, HIGH);
+  static unsigned long lastInterruptTime = 0;
+  unsigned long interruptTime = millis();
+  
+  // If interrupts come faster than BOUNCE_TIME, assume it's a bounce and ignore
+  if (interruptTime - lastInterruptTime > BOUNCE_TIME) {
+    _externalFlag++;
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
+  lastInterruptTime = interruptTime;
 }
-
 // -------------------------------------------------------------------------------
 // Utility to unmount the filesystem and terminate in case of error
 // -------------------------------------------------------------------------------
