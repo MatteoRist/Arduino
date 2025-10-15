@@ -1,8 +1,74 @@
 #include <ChRt.h>
 #include <math.h>
+
+//------------------------------------------------------------------------------
+// Additional part
+//------------------------------------------------------------------------------
+struct DynamicWorkerParams {
+  int period_ms;
+  int load;
+  int duration_s;
+};
+
+static DynamicWorkerParams dynamicParams;
+static thread_t *dynamicThread = nullptr;
+static THD_WORKING_AREA(waDynamic, 160);
+
+static THD_FUNCTION(dynamicWorker, arg) {
+  (void)arg;
+  DynamicWorkerParams params = dynamicParams;
+
+  sysinterval_t period_i = TIME_MS2I(params.period_ms);
+  systime_t deadline_i = chVTGetSystemTimeX();
+  systime_t startTime = chVTGetSystemTimeX();
+
+#if USE_DOUBLE
+  double num = 10;
+#else
+  float num = 10;
+#endif
+
+  while (!chThdShouldTerminateX()) {
+    systime_t now = chVTGetSystemTimeX();
+    if (TIME_I2MS(now - startTime) >= params.duration_s * 1000) break;
+
+    // Symulacja obciążenia
+    for (int i = 0; i < params.load; i++) {
+#if USE_DOUBLE
+      num = exp(num) / (1 + exp(num));
+#else
+      num = expf(num) / (1 + expf(num));
+#endif
+    }
+
+    deadline_i += period_i;
+    if (deadline_i > chVTGetSystemTimeX()) {
+      chThdSleepUntil(deadline_i);
+    }
+  }
+
+  SerialUSB.println("Dynamic worker finished");
+}
+
+void createDynamicWorker(int period_ms, int load, int duration_s) {
+  if (dynamicThread != nullptr && chThdTerminatedX(dynamicThread) == false) {
+    SerialUSB.println("Dynamic worker already running");
+    return;
+  }
+
+  dynamicParams = { period_ms, load, duration_s };
+  dynamicThread = chThdCreateStatic(
+      waDynamic, sizeof(waDynamic),
+      NORMALPRIO + 1, dynamicWorker, nullptr);
+
+  SerialUSB.println("Dynamic worker created");
+}
+
+
 //------------------------------------------------------------------------------
 // Parametrization
 //------------------------------------------------------------------------------
+
 #define USE_DOUBLE FALSE // Change to TRUE to use double precision (heavier)
 #define CYCLE_MS 1000
 #define NUM_THREADS 5 // Three working threads + loadEstimator (top) +
@@ -19,7 +85,6 @@ char thread_name[NUM_THREADS][15] = { "top",
 volatile uint32_t threadPeriod_ms[NUM_THREADS] = { CYCLE_MS, 200, 100, 200, 0 };
 volatile int threadLoadMin[NUM_THREADS]= {0, 100, 50 , 100, 0};
 volatile int threadLoad[NUM_THREADS] = {0, 100, 50, 100, 0};
-volatile int threadLoadWithPicks[NUM_THREADS] = {0, 10, 10 , 10, 0};
 volatile bool threadToLow[NUM_THREADS] = {false, false, false,false ,false};
 volatile int threadLoadMax[NUM_THREADS]= {0, 1000, 10000 , 10000, 0};
 volatile int topCyclesCounter = 0;
@@ -105,12 +170,7 @@ static THD_FUNCTION(top, arg)
         }
       }
     }
-    for (int tid = 1; tid < NUM_THREADS; tid++) {
-      // int sign = (random(0, 2) == 0) ? -1 : 1;
-      // int delta = (int)(DELTA_RANDOM_PICOS * threadLoad[tid]);
-      // threadLoadWithPicks[tid] = threadLoad[tid] + sign * delta;
-      threadLoadWithPicks[tid] = threadLoad[tid];
-    }
+
     for (int tid = 1; tid < NUM_THREADS; tid++) {
       threadLoad_t * thdLoad = &sysLoad.threadLoad[tid];
       thdLoad->loadPerCycle_per = (100 * (float)thdLoad->ticksPerCycle)/accumTicks;
@@ -133,9 +193,9 @@ static THD_FUNCTION(top, arg)
 //------------------------------------------------------------------------------
 // Worker thread executes periodically
 //------------------------------------------------------------------------------
-static THD_WORKING_AREA(waWorker1, 256);
-static THD_WORKING_AREA(waWorker2, 256);
-static THD_WORKING_AREA(waWorker3, 256);
+static THD_WORKING_AREA(waWorker1, 128);
+static THD_WORKING_AREA(waWorker2, 128);
+static THD_WORKING_AREA(waWorker3, 128);
 static THD_FUNCTION(worker, arg)
 {
 int worker_ID = (int)arg;
@@ -145,7 +205,7 @@ systime_t lastBeginTime_i = 0;
 while (!chThdShouldTerminateX()) {
 systime_t beginTime_i = chVTGetSystemTimeX();
 threadEffectivePeriod_ms[worker_ID] = TIME_I2MS(beginTime_i - lastBeginTime_i);
-int niter = threadLoadWithPicks[worker_ID];
+int niter = threadLoad[worker_ID];
 #if USE_DOUBLE
 double num = 10;
 #else
@@ -232,4 +292,20 @@ chBegin(chSetup);
 //------------------------------------------------------------------------------
 // loop() function. It is considered here as the idle thread
 //------------------------------------------------------------------------------
-void loop() { }
+void loop() {
+    static String inputString = "";
+    while (SerialUSB.available()) {
+        char c = SerialUSB.read();
+        if (c == '\n' || c == '\r') {
+            if (inputString.length() > 0) {
+                int period = 0, load = 0, duration = 0;
+                sscanf(inputString.c_str(), "%d,%d,%d", &period, &load, &duration);
+                createDynamicWorker(period, load, duration);
+                inputString = "";
+            }
+        } else {
+            inputString += c;
+        }
+    }
+}
+
