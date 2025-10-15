@@ -6,9 +6,9 @@
 #define USE_DOUBLE FALSE // Change to TRUE to use double precision (heavier)
 #define CYCLE_MS 1000
 #define NUM_THREADS 5 // Three working threads + loadEstimator (top) +
-#define STEP_WHEN_INCORRECT_FREQUENCY 5
+#define STEP_WHEN_INCORRECT_FREQUENCY 6
 #define STEP_WHEN_TOO_MUCH_CPU 2
-#define STEP_WHEN_NOT_EXCEDING 3
+#define STEP_WHEN_NOT_EXCEDING 1
 #define TOP_CYCLES_FOR_PICOS 4
 #define DELTA_RANDOM_PICOS 0.08f
 // loop (as the idle thread)
@@ -17,9 +17,10 @@ char thread_name[NUM_THREADS][15] = { "top",
 "worker_1", "worker_2", "worker_3",
 "idle" };
 volatile uint32_t threadPeriod_ms[NUM_THREADS] = { CYCLE_MS, 200, 100, 200, 0 };
-volatile int threadLoadMin[NUM_THREADS]= {0, 10, 10 , 10, 0};
-volatile int threadLoad[NUM_THREADS] = {0, 10, 10, 10, 0};
+volatile int threadLoadMin[NUM_THREADS]= {0, 100, 50 , 100, 0};
+volatile int threadLoad[NUM_THREADS] = {0, 100, 50, 100, 0};
 volatile int threadLoadWithPicks[NUM_THREADS] = {0, 10, 10 , 10, 0};
+volatile bool threadToLow[NUM_THREADS] = {false, false, false,false ,false};
 volatile int threadLoadMax[NUM_THREADS]= {0, 1000, 10000 , 10000, 0};
 volatile int topCyclesCounter = 0;
 volatile uint32_t threadEffectivePeriod_ms[NUM_THREADS] = { 0, 0, 0, 0, 0 };
@@ -69,6 +70,7 @@ static THD_FUNCTION(top, arg)
     // so we can use this timestamp for all threads
     lastTime_i = chVTGetSystemTimeX();
     // tid starts at 1 because we do not include this thread (top)
+    int exceeded = 0;
     for (int tid = 1; tid < NUM_THREADS; tid++) {
       threadLoad_t * thdLoad = &(sysLoad.threadLoad[tid]);
       thdLoad->lastSampleTime_i = lastTime_i;
@@ -76,32 +78,38 @@ static THD_FUNCTION(top, arg)
       thdLoad->ticksPerCycle = ticks - thdLoad->ticksTotal;
       thdLoad->ticksTotal = ticks;
       accumTicks += thdLoad->ticksPerCycle;
-      if(threadEffectivePeriod_ms[tid]!=threadPeriod_ms[tid]){
-        threadLoad[tid] = max(threadLoad[tid]-STEP_WHEN_INCORRECT_FREQUENCY, threadLoadMin[tid]);
+      if(threadEffectivePeriod_ms[tid]>threadPeriod_ms[tid]){
+        exceeded = 1;
       }
     }
 
-    if(100-(100 * (float)sysLoad.threadLoad[4].ticksPerCycle)/accumTicks>85){
-      if(topCyclesCounter >= TOP_CYCLES_FOR_PICOS){
-        for (int tid = 1; tid < NUM_THREADS; tid++) {
-        threadLoad[tid] = max(threadLoadMin[tid] , threadLoad[tid]- STEP_WHEN_TOO_MUCH_CPU);
+    if(exceeded == 1){
+      int maxLoadThread = 1;
+      for (int i = 1 ;i< NUM_THREADS; i++){
+        if(sysLoad.threadLoad[i].ticksPerCycle>sysLoad.threadLoad[maxLoadThread].ticksPerCycle){
+            maxLoadThread = i;
         }
-        topCyclesCounter == 0;
-      }else{
-        topCyclesCounter++;
       }
-      
+      threadLoad[maxLoadThread] = max(threadLoad[maxLoadThread]-STEP_WHEN_INCORRECT_FREQUENCY, threadLoadMin[maxLoadThread]);
     }
-    else{
-      for (int tid = 1; tid < NUM_THREADS; tid++) {
-        threadLoad[tid] = min(threadLoadMax[tid], threadLoad[tid]+STEP_WHEN_NOT_EXCEDING);
+    else if (exceeded == 0){
+
+      if(100-(100 * (float)sysLoad.threadLoad[4].ticksPerCycle)/accumTicks>85){
+          for (int tid = 1; tid < NUM_THREADS; tid++) {
+            threadLoad[tid] = max(threadLoadMin[tid] , threadLoad[tid]- STEP_WHEN_TOO_MUCH_CPU);
+          }
       }
-      topCyclesCounter == 0;
+      else{
+        for (int tid = 1; tid < NUM_THREADS; tid++) {
+          threadLoad[tid] = min(threadLoadMax[tid], threadLoad[tid]+STEP_WHEN_NOT_EXCEDING);
+        }
+      }
     }
     for (int tid = 1; tid < NUM_THREADS; tid++) {
-      int sign = (random(0, 2) == 0) ? -1 : 1;
-      int delta = (int)(DELTA_RANDOM_PICOS * threadLoad[tid]);
-      threadLoadWithPicks[tid] = threadLoad[tid] + sign * delta;
+      // int sign = (random(0, 2) == 0) ? -1 : 1;
+      // int delta = (int)(DELTA_RANDOM_PICOS * threadLoad[tid]);
+      // threadLoadWithPicks[tid] = threadLoad[tid] + sign * delta;
+      threadLoadWithPicks[tid] = threadLoad[tid];
     }
     for (int tid = 1; tid < NUM_THREADS; tid++) {
       threadLoad_t * thdLoad = &sysLoad.threadLoad[tid];
