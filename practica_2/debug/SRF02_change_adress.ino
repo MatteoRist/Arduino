@@ -1,8 +1,8 @@
 #include <Wire.h>
 
-#define CURRENT_ADDR 0x70        // obecny 7-bitowy adres SRF02
-#define NEW_ADDR_8BIT 0xE2       // nowy adres w formacie 8-bitowym (np. 0xF2)
-#define COMMAND_REGISTER 0x00    // rejestr poleceń SRF02
+#define CURRENT_ADDR 0x70        // current 7 bit adress
+#define NEW_ADDR_8BIT 0xE2       // new adress in 8 bit format
+#define COMMAND_REGISTER 0x00    //
 
 void setup() {
   Wire.begin();
@@ -14,7 +14,7 @@ void setup() {
   Serial.print(CURRENT_ADDR, HEX);
   Serial.println("...");
 
-  // Sekwencja zmiany adresu: 0xA0, 0xAA, 0xA5, NEW_ADDR
+  // Changing adress sequence: 0xA0, 0xAA, 0xA5, NEW_ADDR
   sendCommand(0xA0);
   delay(50);
   sendCommand(0xAA);
@@ -30,7 +30,7 @@ void setup() {
 }
 
 void loop() {
-  // nic nie robimy — adres już zmieniony
+
 }
 
 void sendCommand(byte cmd) {

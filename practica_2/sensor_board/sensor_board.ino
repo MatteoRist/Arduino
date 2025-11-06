@@ -134,51 +134,56 @@ static THD_FUNCTION(SRF02_handler_function, arg)
 #define OLED_I2C_ADDRESS 0x3C
 SSD1306AsciiWire oled;
 
-static THD_WORKING_AREA(OLED_handler1, 192);
+static THD_WORKING_AREA(OLED_handler1, 512);
 static thread_t *oled_thread;
 
 static THD_FUNCTION(OLED_handler_function, arg) {
     (void)arg;
     chRegSetThreadName("OLED handler");
 
-    // Inicjalizacja I2C i wyświetlacza
     chMtxLock(&i2c_mutex);
-    Wire.begin();
-    Wire.setClock(400000L);
     oled.begin(&Adafruit128x64, OLED_I2C_ADDRESS);
     oled.setFont(Adafruit5x7);
     oled.clear();
-    oled.println("OLED started");
     chMtxUnlock(&i2c_mutex);
 
-    // Główna pętla statusu
+    const int lines = 2;
+    const int line_len = 20;
+    char current_screen[lines][line_len] = {{0}};
+    char last_screen[lines][line_len] = {{0}};
+
     while(true) {
-        chMtxLock(&i2c_mutex);
-        oled.clear();
-        oled.setCursor(0, 0);
-        oled.println("SRF02 STATUS:");
-        for (int i = 0; i < 2; i++) {
-            oled.print("ID");
-            oled.print(i);
-            oled.print(": ");
-            if (SRF02_works[i]) oled.print("OK ");
-            else oled.print("ERR ");
+        
+        int delay0, delay1;
+        bool works0, works1;
+        delay0 = SRF02_delay[0];
+        works0 = SRF02_works[0];
+        delay1 = SRF02_delay[1];
+        works1 = SRF02_works[1];
 
-            if (SRF02_periodic_mode[i]) oled.print("P ");
-            else oled.print("M "); // Manual
 
-            oled.print("D:");
-            oled.print(SRF02_delay[i]);
-            oled.print(" P:");
-            oled.print(SRF02_reading_period_ms[i]);
-            oled.println();
+        // Making text
+        snprintf(current_screen[0], line_len, "ID0:%s D:%d", works0 ? "OK" : "ER", delay0);
+        snprintf(current_screen[1], line_len, "ID1:%s D:%d", works1 ? "OK" : "ER", delay1);
+
+        // Iterating over every char for comparing differences
+        for(int i = 0; i < lines; i++) {
+            for(int j = 0; j < line_len-1; j++) { 
+                if(current_screen[i][j] != last_screen[i][j]) {
+                    chMtxLock(&i2c_mutex);
+                    oled.setCursor(j*6, i*2);
+                    oled.write(current_screen[i][j]);
+                    chMtxUnlock(&i2c_mutex);
+                    last_screen[i][j] = current_screen[i][j];
+                    chThdSleepMilliseconds(10);
+                }
+            }
         }
-        chMtxUnlock(&i2c_mutex);
 
-        // Odświeżanie co 1s
-        chThdSleepMilliseconds(1000);
+        chThdSleepMilliseconds(1000); 
     }
 }
+
 
 
 //------------------------------------------------------------------------------
@@ -197,7 +202,7 @@ static volatile int read_ptr = 0;
 
 static thread_t * can_thread;
 
-static THD_WORKING_AREA(CAN_handler1, 128);
+static THD_WORKING_AREA(CAN_handler1, 256);
 
 
 static THD_FUNCTION(CAN_handler_function, arg) {
@@ -206,7 +211,7 @@ static THD_FUNCTION(CAN_handler_function, arg) {
 
     while(true) {
         chEvtWaitOne(EVENT_MASK(0));
-
+        SerialUSB.println("wszedlem");
         while(read_ptr != write_ptr) {
             CANFrameStruct frame = can_buffer[read_ptr];
             read_ptr = (read_ptr + 1) % CAN_BUFFER_SIZE;
@@ -223,9 +228,9 @@ static THD_FUNCTION(CAN_handler_function, arg) {
             SerialUSB.println();
 #endif
 
-            uint8_t sensor_id  = (frame.data[0] >> 6) & 0b11;    // bity 7-6
-            uint8_t command    = (frame.data[0] >> 2) & 0b1111;  // bity 5-2
-            uint8_t subcommand = frame.data[0] & 0b11;           // bity 1-0
+            uint8_t sensor_id  = (frame.data[0] >> 6) & 0b11;    // bits 7-6
+            uint8_t command    = (frame.data[0] >> 2) & 0b1111;  // bits 5-2
+            uint8_t subcommand = frame.data[0] & 0b11;           // bits 1-0
 
             if(frame.can_id == 0x110){
                 handle_srf02_command(sensor_id, command, subcommand, frame.data + 1, frame.size - 1);
@@ -237,7 +242,7 @@ static THD_FUNCTION(CAN_handler_function, arg) {
 
 void CAN_on_receive(int packetSize) {
     chSysLockFromISR();
-
+    SerialUSB.print("ISR");
     if(CAN.packetId() <= 0x7FF && CAN.available() > 0) {
         CANFrameStruct frame;
         frame.can_id = CAN.packetId();
@@ -246,7 +251,7 @@ void CAN_on_receive(int packetSize) {
             frame.data[i] = CAN.read();
 
         int next = (write_ptr + 1) % CAN_BUFFER_SIZE;
-        if(next != read_ptr) {  // sprawdzanie przepełnienia
+        if(next != read_ptr) {  
             can_buffer[write_ptr] = frame;
             write_ptr = next;
         }
@@ -257,7 +262,7 @@ void CAN_on_receive(int packetSize) {
 }
 
 static void handle_srf02_command(uint8_t sensor_id, uint8_t command, uint8_t subcommand, uint8_t* args, uint8_t arg_size) {
-    if(sensor_id >= 2) return; // tylko 2 sensory
+    if(sensor_id >= 2) return; // only 2 sensors should be param
 
     switch(command) {
         case 0x0:  // one-shot / on / off
@@ -268,7 +273,7 @@ static void handle_srf02_command(uint8_t sensor_id, uint8_t command, uint8_t sub
 
                 case 0x1:  // on <period_ms>
                     if(arg_size >= 1) {
-                        uint16_t period = args[0]; // jeśli potrzebujesz 16 bitów, w args[0] i args[1]
+                        uint16_t period = args[0];
 
                         if(period < SRF02_delay[sensor_id] + 20) {
                             period = SRF02_delay[sensor_id] + 20;
@@ -289,12 +294,10 @@ static void handle_srf02_command(uint8_t sensor_id, uint8_t command, uint8_t sub
             break;
 
         case 0x1:  // unit
-            if(arg_size >= 1) {
-                if(subcommand>2){
-                    return;
-                }
-                SRF02_command[sensor_id] = REAL_RANGING_MODE_INCHES + subcommand; // 0=inc,1=cm,2=ms
+            if(subcommand>2){
+                return;
             }
+            SRF02_command[sensor_id] = REAL_RANGING_MODE_INCHES + subcommand; // 0=inc,1=cm,2=ms
             break;
 
         case 0x2:  // delay
@@ -358,18 +361,27 @@ void chSetup()
     // Threads
     SRF02_threads[0] = chThdCreateStatic(
         SRF02_handler1, sizeof(SRF02_handler1),
-        NORMALPRIO, SRF02_handler_function, (void*)0
+        NORMALPRIO+1, SRF02_handler_function, (void*)0
     );
 
     SRF02_threads[1] = chThdCreateStatic(
         SRF02_handler2, sizeof(SRF02_handler2),
-        NORMALPRIO, SRF02_handler_function, (void*)1
+        NORMALPRIO+1, SRF02_handler_function, (void*)1
     );
+    
     can_thread = chThdCreateStatic(CAN_handler1, sizeof(CAN_handler1),
-                  NORMALPRIO, CAN_handler_function, NULL);
+                  NORMALPRIO+1, CAN_handler_function, NULL);
+
+    
 
     // ISR for can        
     CAN.onReceive(CAN_on_receive);
+
+    oled_thread = chThdCreateStatic(
+        OLED_handler1, sizeof(OLED_handler1),
+        NORMALPRIO, OLED_handler_function, NULL
+    );
+    
 }
 
 void setup(){
