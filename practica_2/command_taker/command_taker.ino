@@ -17,13 +17,13 @@ struct CANFrameStruct {
 // CAN handler thread
 //------------------------------------------------------------------------------
 static thread_t* can_thread;
-static THD_WORKING_AREA(CAN_handler, 128);
+static THD_WORKING_AREA(CAN_handler, 512);
 static CANFrameStruct frame;
 
 //------------------------------------------------------------------------------
 // CAN receive handler thread
 //------------------------------------------------------------------------------
-#define CAN_BUFFER_SIZE 16
+#define CAN_BUFFER_SIZE 32
 static CANFrameStruct can_buffer[CAN_BUFFER_SIZE];
 static volatile int write_ptr = 0;
 static volatile int read_ptr = 0;
@@ -38,7 +38,7 @@ static THD_FUNCTION(CAN_handler_function, arg) {
 
         while (read_ptr != write_ptr) {
             CANFrameStruct frame = can_buffer[read_ptr];
-            read_ptr = (read_ptr + 1) % CAN_BUFFER_SIZE;
+            read_ptr = (read_ptr + 1) & (CAN_BUFFER_SIZE-1);
 
 #if DEBUG_CAN_TX
             SerialUSB.print("[CAN RX] ID=0x");
@@ -95,27 +95,18 @@ static THD_FUNCTION(CAN_handler_function, arg) {
 // CAN interrupt callback
 //------------------------------------------------------------------------------
 void CAN_on_receive(int packetSize) {
-
-
-      
-
-    chSysLockFromISR();
-    if (CAN.packetId() <= 0x7FF) {
-            uint8_t size = CAN.available();
-            CANFrameStruct frame;
-            frame.id = CAN.packetId();
-            frame.size = packetSize;
-            for (uint8_t i = 0; i < size; i++)
-                frame.data[i] = CAN.read();
-
-            int next = (write_ptr + 1) % CAN_BUFFER_SIZE;
-            if (next != read_ptr) {
-                can_buffer[write_ptr] = frame;
-                write_ptr = next;
-            }
-    } 
-    chEvtSignalI(can_thread, EVENT_MASK(0));
-    chSysUnlockFromISR();
+    
+    int next = (write_ptr + 1) & (CAN_BUFFER_SIZE - 1);
+    if(next != read_ptr) {
+        chSysLockFromISR();
+        can_buffer[write_ptr].id = CAN.packetId();
+        can_buffer[write_ptr].size = CAN.available();
+        for(uint8_t i=0; i<can_buffer[write_ptr].size; i++)
+            can_buffer[write_ptr].data[i] = CAN.read();
+        write_ptr = next;
+        chEvtSignalI(can_thread, EVENT_MASK(0));
+      chSysUnlockFromISR();
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -229,7 +220,7 @@ static THD_FUNCTION(UserHandlerFunction, arg) {
                 buf[idx++] = c;
             }
         }
-        chThdSleepMilliseconds(10);
+        chThdSleepMilliseconds(50);
     }
 }
 
@@ -269,7 +260,7 @@ void chSetup() {
 
     SerialUSB.println("Sensor interface ready. Type 'help' for commands.");
 
-    can_thread = chThdCreateStatic(CAN_handler, sizeof(CAN_handler), NORMALPRIO,
+    can_thread = chThdCreateStatic(CAN_handler, sizeof(CAN_handler), NORMALPRIO+1,
                                    CAN_handler_function, NULL);
     chThdCreateStatic(UserHandler, sizeof(UserHandler), NORMALPRIO, UserHandlerFunction, NULL);
 
