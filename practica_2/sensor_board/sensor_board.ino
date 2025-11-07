@@ -192,7 +192,7 @@ static THD_FUNCTION(OLED_handler_function, arg) {
 //------------------------------------------------------------------------------
 #define CAN_BUFFER_SIZE 16
 struct CANFrameStruct {
-    uint16_t can_id;
+    uint16_t id;
     uint8_t size;
     uint8_t data[8];
 };
@@ -218,7 +218,7 @@ static THD_FUNCTION(CAN_handler_function, arg) {
 
 #if DEBUG_CAN_TX
             SerialUSB.print("[CAN RX] ID=0x");
-            SerialUSB.print(frame.can_id, HEX);
+            SerialUSB.print(frame.id, HEX);
             SerialUSB.print(" DATA: ");
             for (int i = 0; i < frame.size; i++) {
                 if (frame.data[i] < 0x10) SerialUSB.print("0");
@@ -232,7 +232,7 @@ static THD_FUNCTION(CAN_handler_function, arg) {
             uint8_t command    = (frame.data[0] >> 2) & 0b1111;  // bits 5-2
             uint8_t subcommand = frame.data[0] & 0b11;           // bits 1-0
 
-            if(frame.can_id == 0x110){
+            if(frame.id == 0x110){
                 handle_srf02_command(sensor_id, command, subcommand, frame.data + 1, frame.size - 1);
             }
         }
