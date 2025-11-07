@@ -9,6 +9,8 @@
 mutex_t i2c_mutex;
 mutex_t can_mutex;
 
+#define MINIMAL_PERIOD 40
+#define MINIMAL_DELAY 65
 
 inline int SRF02_write_command(byte address,byte command)
 { 
@@ -18,7 +20,7 @@ inline int SRF02_write_command(byte address,byte command)
   return Wire.endTransmission();
 }
 
-byte SRF02_read_register(byte address,byte the_register)
+inline byte SRF02_read_register(byte address,byte the_register)
 {
   Wire.beginTransmission(address);
   Wire.write(the_register);
@@ -30,12 +32,12 @@ byte SRF02_read_register(byte address,byte the_register)
   return Wire.read();
 } 
 
-void SRF02_get_range(int address, uint8_t range_bytes[2]) {
+inline void SRF02_get_range(int address, uint8_t range_bytes[2]) {
     range_bytes[0] = SRF02_read_register(address, RANGE_HIGH_BYTE);
     range_bytes[1] = SRF02_read_register(address, RANGE_LOW_BYTE);
 }
 
-void SRF02_get_min(int address, uint8_t range_bytes[2]) {
+inline void SRF02_get_min(int address, uint8_t range_bytes[2]) {
     range_bytes[0] = SRF02_read_register(address, AUTOTUNE_MINIMUM_HIGH_BYTE);
     range_bytes[1] = SRF02_read_register(address, AUTOTUNE_MINIMUM_LOW_BYTE);
 }
@@ -61,7 +63,7 @@ static THD_FUNCTION(SRF02_handler_function, arg)
     systime_t time = chVTGetSystemTime();
     while(true){
         chEvtWaitOne(EVENT_MASK(0));
-        time = chVTGetSystemTime();
+
         if(!SRF02_periodic_mode[worker_id]) {
             // one-shot
             chMtxLock(&i2c_mutex);
@@ -113,8 +115,7 @@ static THD_FUNCTION(SRF02_handler_function, arg)
                 chMtxUnlock(&can_mutex);
 
                 // Sleeping for periodic 
-                time += TIME_MS2I(SRF02_reading_period_ms[worker_id]);
-                chThdSleepUntil(time);
+                chThdSleepMilliseconds(SRF02_reading_period_ms[worker_id]);
             } else{
                 SRF02_periodic_mode[worker_id] = false;
                 SRF02_works[worker_id] = false;
@@ -163,8 +164,8 @@ static THD_FUNCTION(OLED_handler_function, arg) {
 
 
         // Making text
-        snprintf(current_screen[0], line_len, "ID0:%s D:%d", works0 ? "OK" : "ER", delay0);
-        snprintf(current_screen[1], line_len, "ID1:%s D:%d", works1 ? "OK" : "ER", delay1);
+        snprintf(current_screen[0], line_len, "ID0:%s D:%02X", works0 ? "OK" : "ER", delay0);
+        snprintf(current_screen[1], line_len, "ID1:%s D:%02X", works1 ? "OK" : "ER", delay1);
 
         // Iterating over every char for comparing differences
         for(int i = 0; i < lines; i++) {
@@ -211,10 +212,9 @@ static THD_FUNCTION(CAN_handler_function, arg) {
 
     while(true) {
         chEvtWaitOne(EVENT_MASK(0));
-        SerialUSB.println("wszedlem");
         while(read_ptr != write_ptr) {
             CANFrameStruct frame = can_buffer[read_ptr];
-            read_ptr = (read_ptr + 1) % CAN_BUFFER_SIZE;
+            read_ptr = (read_ptr + 1) & (CAN_BUFFER_SIZE-1);
 
 #if DEBUG_CAN_TX
             SerialUSB.print("[CAN RX] ID=0x");
@@ -241,24 +241,17 @@ static THD_FUNCTION(CAN_handler_function, arg) {
 
 
 void CAN_on_receive(int packetSize) {
-    chSysLockFromISR();
-    SerialUSB.print("ISR");
-    if(CAN.packetId() <= 0x7FF && CAN.available() > 0) {
-        CANFrameStruct frame;
-        frame.can_id = CAN.packetId();
-        frame.size = CAN.available();
-        for(int i=0; i<frame.size; i++)
-            frame.data[i] = CAN.read();
-
-        int next = (write_ptr + 1) % CAN_BUFFER_SIZE;
-        if(next != read_ptr) {  
-            can_buffer[write_ptr] = frame;
-            write_ptr = next;
-        }
+    int next = (write_ptr + 1) & (CAN_BUFFER_SIZE - 1);
+    if(next != read_ptr) {
+        chSysLockFromISR();
+        can_buffer[write_ptr].id = CAN.packetId();
+        can_buffer[write_ptr].size = CAN.available();
+        for(uint8_t i=0; i<can_buffer[write_ptr].size; i++)
+            can_buffer[write_ptr].data[i] = CAN.read();
+        write_ptr = next;
+        chEvtSignalI(can_thread, EVENT_MASK(0));
+      chSysUnlockFromISR();
     }
-
-    chEvtSignalI(can_thread, EVENT_MASK(0));
-    chSysUnlockFromISR();
 }
 
 static void handle_srf02_command(uint8_t sensor_id, uint8_t command, uint8_t subcommand, uint8_t* args, uint8_t arg_size) {
@@ -275,10 +268,10 @@ static void handle_srf02_command(uint8_t sensor_id, uint8_t command, uint8_t sub
                     if(arg_size >= 1) {
                         uint16_t period = args[0];
 
-                        if(period < SRF02_delay[sensor_id] + 20) {
-                            period = SRF02_delay[sensor_id] + 20;
+                        if(period < MINIMAL_PERIOD) {
+                            period = MINIMAL_PERIOD;
                         }
-                        SRF02_reading_period_ms[sensor_id] = period+ SRF02_delay[sensor_id];
+                        SRF02_reading_period_ms[sensor_id] = period;
                         SRF02_periodic_mode[sensor_id] = true;
                         chEvtSignal(SRF02_threads[sensor_id], EVENT_MASK(0));
                     }
@@ -303,6 +296,7 @@ static void handle_srf02_command(uint8_t sensor_id, uint8_t command, uint8_t sub
         case 0x2:  // delay
             if(arg_size >= 1) {
                 uint16_t delay_ms = args[0]; // lub args[0]<<8 | args[1] jeśli 16 bit
+                if(delay_ms< MINIMAL_DELAY) delay_ms = MINIMAL_DELAY;
                 SRF02_delay[sensor_id] = delay_ms;
             }
             break;
