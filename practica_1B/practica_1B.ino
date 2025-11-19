@@ -74,7 +74,7 @@ void createDynamicWorker(int period_ms, int load, int duration_s) {
 #define NUM_THREADS 5 // Three working threads + loadEstimator (top) +
 #define STEP_WHEN_INCORRECT_FREQUENCY 6
 #define STEP_WHEN_TOO_MUCH_CPU 2
-#define STEP_WHEN_NOT_EXCEDING 1
+#define STEP_WHEN_NOT_EXCEDING 2
 #define TOP_CYCLES_FOR_PICOS 4
 #define DELTA_RANDOM_PICOS 0.08f
 // loop (as the idle thread)
@@ -294,7 +294,7 @@ chBegin(chSetup);
 //------------------------------------------------------------------------------
 void loop() {
     static String inputString = "";
-    while (SerialUSB.available()) {
+    while (SerialUSB.available()) { 
         char c = SerialUSB.read();
         if (c == '\n' || c == '\r') {
             if (inputString.length() > 0) {
