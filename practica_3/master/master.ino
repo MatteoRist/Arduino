@@ -6,7 +6,7 @@ const uint8_t localAddress = 0xA1;   // Master
 const uint8_t destination   = 0xB1;  // Slave
 
 // Timeout in ms
-const unsigned long TIMEOUT_MS = 10000;
+const unsigned long TIMEOUT_MS = 20000;
 
 // Thresholds for link quality
 const int RSSI_THRESHOLD = -100;   // dBm
@@ -79,6 +79,7 @@ void sendPing() {
   waitingForReply = true;
 
   Serial.println("PING sent, waiting for PONG...");
+  LoRa.receive();
 }
 
 void onReceive(int packetSize) {
