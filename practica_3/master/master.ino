@@ -3,28 +3,17 @@
 #include "networking.h"
 
 
-
-// ---- IDs ----
-const uint8_t localAddress = 0xA1;   // Master
-const uint8_t destination  = 0xB1;   // Slave
-
-// ---- Config type ----
-
-
-
+#define SERIAL_DBG 0
 
 // Default
-const LoRaConfig_t defaultConf = { 8, 9, 8, 2 };
-LoRaConfig_t currentConf = defaultConf;
-LoRaConfig_t nextConf;
 bool hasPendingConfigChange = false;
 
 // ---- State machine ----
-enum MasterState { IDLE, SENDING_TEST, WAITING_PONGS, SENDING_FINAL, ANALYZE_IDLE };
+enum MasterState { IDLE, SENDING_TEST, SENDING_FINAL, ANALYZE_IDLE };
 MasterState state = IDLE;
 
 unsigned long lastActionTime = 0;
-unsigned long msgSentTime = 0;
+
 
 
 // Test tracking
@@ -33,18 +22,6 @@ uint8_t ping_sent = 0;
 uint8_t pongs_received = 0;
 unsigned long testStartTime = 0;
 
-// thresholds
-const int RSSI_THRESHOLD = -90;
-const int SNR_THRESHOLD  = -5;
-
-// ---- function prototypes ----
-void onReceive(int packetSize);
-void onTxDone();
-void sendPing(uint8_t testId, uint8_t pingId);
-void sendFinalPing(uint8_t finalCount);
-void applyConfig(LoRaConfig_t conf);
-uint8_t encodeConfig(LoRaConfig_t conf, uint8_t* payload);
-void checkForOptimization(int remoteRSSI, int remoteSNR);
 
 void setup() {
   Serial.begin(9600);
@@ -55,11 +32,15 @@ void setup() {
     while (true);
   }
 
+    // ---- IDs ----
+  localAddress = 0xA1;   // Master
+  destination  = 0xB1;   // Slave
+
   LoRa.onReceive(onReceive);
   LoRa.onTxDone(onTxDone);
   LoRa.receive();
 
-  applyConfig(currentConf);
+  establishConnection();
   Serial.println("Master ready. Using Default Config.");
   state = IDLE;
   lastActionTime = millis();
@@ -68,12 +49,6 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // TIMEOUT if waiting for pongs too long
-  if (state == WAITING_PONGS && (now - testStartTime > TIMEOUT_MS)) {
-    Serial.println("Timeout waiting for PONGs. Analyzing what arrived.");
-    state = ANALYZE_IDLE;
-  }
-
   // If tx is in progress, we wait for onTxDone to schedule next time.
   // Only send if not txInProgress and now >= nextTxTime
   if (!txInProgress && now >= nextTxTime) {
@@ -81,24 +56,24 @@ void loop() {
       // start a test
       Serial.println("Starting new multi-PING test");
       state = SENDING_TEST;
-      test_id = TEST_ID_MAIN;
+      test_id = TEST_ID_MAIN << 7;
       ping_sent = 0;
       pongs_received = 0;
     }
 
     if (state == SENDING_TEST) {
       if (ping_sent < PING_COUNT) {
-        sendPing(test_id, ping_sent);
+        sendPing((ping_sent | test_id), pongs_received);
         ping_sent++;
         // after sending last ping, go to wait
         if (ping_sent == PING_COUNT) {
-          state = WAITING_PONGS;
+          state = SENDING_FINAL;
           testStartTime = millis();
         }
       }
     } else if (state == SENDING_FINAL) {
       // send single final ping containing how many pongs we received
-      sendFinalPing(pongs_received);
+      sendPing(ping_sent, pongs_received);
       state = ANALYZE_IDLE;
     } else if (state == ANALYZE_IDLE) {
       // analyze results and decide config changes
@@ -126,7 +101,6 @@ void loop() {
         // schedule a repeat of the test (do nothing now, will restart test next loop)
         state = IDLE;
         lastActionTime = nowt;
-        delay(10);
         return;
       } else { // > 0.9
         Serial.println("> 90% -> candidate to increase speed");
@@ -156,24 +130,12 @@ void loop() {
         Serial.println("No config change or change too recent.");
         state = IDLE;
       }
-    } else if (state == WAITING_PONGS) {
-      // nothing; wait for pongs or timeout
     }
   }
 }
 
 // --- TX / RX / helpers ---
 
-void onTxDone() {
-  // called from ISR context typically
-  unsigned long now = millis();
-  lastTxDuration = now - txStartTime;
-  txInProgress = false;
-  nextTxTime = now + lastTxDuration + EXTRA_MARGIN_MS;
-  LoRa.receive(); // go back to receive mode
-  Serial.print("TX done. duration(ms): "); Serial.print(lastTxDuration);
-  Serial.print(" nextTxTime in(ms): "); Serial.println(lastTxDuration + EXTRA_MARGIN_MS);
-}
 
 void onReceive(int packetSize) {
   if (packetSize == 0) return;
@@ -181,32 +143,40 @@ void onReceive(int packetSize) {
   int recipient = LoRa.read();
   int sender    = LoRa.read();
   uint8_t msgId = LoRa.read();
-  uint8_t incomingLength = LoRa.read();
+
 
   if (recipient != localAddress) return;
+
+#if SERIAL_DBG
   Serial.print("SNR  ==");Serial.print(LoRa.packetSnr());
   Serial.print("  RSSI =="); Serial.println(LoRa.rssi());
+#endif
+
   // read payload
   uint8_t buffer[10];
   uint8_t rcvd = 0;
   while (LoRa.available() && rcvd < sizeof(buffer)) {
     buffer[rcvd++] = (uint8_t)LoRa.read();
   }
-
-  if (msgId == MSG_PONG) {
+  if(msgId == MSG_ESTABLISH_CONN){
+    ConnectionFrame.flags = buffer[0];
+    ConnectionFrame.rssi = buffer[1];
+    ConnectionFrame.snr = buffer[2];
+    receivedConnectionFrame = true;
+  }
+  else if (msgId == MSG_PONG) {
     // PONG payload format: [ test_id, count_received ]
     if (rcvd >= 2) {
       uint8_t t_id = buffer[0];
       uint8_t received = buffer[1];
+      pongs_received++;
+
+#if SERIAL_DBG
       Serial.print("<- PONG from "); Serial.print(sender, HEX);
       Serial.print(" test_id:"); Serial.print(t_id);
       Serial.print(" got_count:"); Serial.println(received);
+#endif
 
-      if (t_id == TEST_ID_MAIN) {
-        pongs_received = received; // slave tells how many pings it received so far
-        // after receiving first PONG we might still be waiting for more PONGs
-        // If slave sends only summary PONGs (e.g. incremental), we accept the latest value.
-      }
     }
   } else if (msgId == MSG_ACK) {
     // Slave ACK to CONFIG
@@ -220,56 +190,27 @@ void onReceive(int packetSize) {
   }
 }
 
-void sendPing(uint8_t testId, uint8_t pingId) {
+void sendPing(uint8_t pingId, uint8_t pongReceived) {
   // payload: [testId, pingId]
-  uint8_t payload[2];
-  payload[0] = testId;
-  payload[1] = pingId;
 
   LoRa.beginPacket();
   LoRa.write(destination);
   LoRa.write(localAddress);
   LoRa.write(MSG_PING);
-  LoRa.write(2); // len
-  LoRa.write(payload, 2);
+  LoRa.write(pingId);
+  LoRa.write(pongReceived);
   LoRa.endPacket(true);
 
   txInProgress = true;
   txStartTime = millis();
-  msgSentTime = txStartTime;
-  Serial.print("-> Sent PING id: "); Serial.println(pingId);
+#if SERIAL_DBG
+  Serial.print("-> Sent PING id: "); Serial.print(pingId);
+  Serial.print("   Pong received "); Serial.print(pongReceived);
+#endif
 }
 
-void sendFinalPing(uint8_t finalCount) {
-  // payload: [TEST_ID_FINAL, finalCount]
-  uint8_t payload[2];
-  payload[0] = TEST_ID_FINAL;
-  payload[1] = finalCount;
 
-  LoRa.beginPacket();
-  LoRa.write(destination);
-  LoRa.write(localAddress);
-  LoRa.write(MSG_PING);
-  LoRa.write(2);
-  LoRa.write(payload, 2);
-  LoRa.endPacket(true);
 
-  txInProgress = true;
-  txStartTime = millis();
-  Serial.print("-> Sent FINAL PING with count: "); Serial.println(finalCount);
-}
-
-void applyConfig(LoRaConfig_t conf) {
-  LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
-  LoRa.setSpreadingFactor(conf.spreadingFactor);
-  LoRa.setCodingRate4(conf.codingRate);
-  LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
-  LoRa.setSyncWord(0x12);
-  LoRa.setPreambleLength(12);
-  Serial.print("Applied Config -> SF:"); Serial.print(conf.spreadingFactor);
-  Serial.print(" BW_IDX:"); Serial.println(conf.bandwidth_index);
-  Serial.println('\n\n');
-}
 
 // Encode config into payload, returning length
 uint8_t encodeConfig(LoRaConfig_t conf, uint8_t* payload) {

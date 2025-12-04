@@ -5,14 +5,15 @@
 #define MASTER 1
 
 
-#define RSSI_THRESHOLD = -90;
-#define SNR_THRESHOLD  = -5;
+#define RSSI_THRESHOLD -90
+#define SNR_THRESHOLD  -5
 // ---- TEST / TIMING ----
 #define PING_COUNT 4
 #define EXTRA_MARGIN_MS 100
 #define TIMEOUT_MS 10000UL
 #define PING_INTERVAL_MS 2000UL
 #define MIN_TIME_BETWEEN_CFG_CHANGES_MS 15000UL
+#define DUTY_CYCLE 1
 
 
 uint8_t localAddress;
@@ -41,6 +42,10 @@ typedef struct {
   uint8_t txPower;
 } LoRaConfig_t;
 
+LoRaConfig_t lastConfig;
+LoRaConfig_t currentConf;
+volatile LoRaConfig_t nextConf;
+
 // Bandwidth lookup (Hz)
 
 const double bandwidth_kHz[10] = {
@@ -53,11 +58,12 @@ Scanning two defices
 ------------------------------*/
 
 const LoRaConfig_t configs[] = {
-    {6, 12, 8, 14},   // very reliable, slow
-    {7, 10, 7, 10},
-    {8, 9,  7, 6},
-    {9, 7,  5, 2},   // fast but least reliable
+    {8, 7,  6, 2},   // fast but least reliable
+    {7, 9,  7, 6},
+    {6, 12, 8, 10},   // very reliable, slow 
 };
+
+int currentBasicCfg;
 
 #define MSG_HS_SYN 0x00
 #define MSG_HS_SYN_ACK 0x01
@@ -75,9 +81,9 @@ volatile bool receivedConnectionFrame = false;
 
 #define CFG_COUNT (sizeof(configs)/sizeof(configs[0]))
 
-void establishConnection(uint8_t sender, uint8_t receiver, bool master){
+void establishConnection(){
 
-    int currentCfg = 0;
+    currentBasicCfg = 0;
     unsigned long lastCfgSwitch = 0;
     unsigned int CFG_SWITCH_INTERVAL;
     unsigned long now;
@@ -87,7 +93,7 @@ void establishConnection(uint8_t sender, uint8_t receiver, bool master){
     /*------------------------------
     Master logic
     ------------------------------*/
-    CFG_SWITCH_INTERVAL = 400;
+    CFG_SWITCH_INTERVAL = 200;
 
     while(!connectionEstablished){
 
@@ -100,7 +106,7 @@ void establishConnection(uint8_t sender, uint8_t receiver, bool master){
                     Serial.println("[MASTER] got SYN-ACK");
 
                     // Evaluate link quality
-                    bool goodEnough = (ConnectionFrame.rssi > RSSI_THRESHOLD) && (ConnectionFrame.snr > SNR_THRESHOLD);
+                    bool goodEnough = (-(ConnectionFrame.rssi) >= RSSI_THRESHOLD) && ((ConnectionFrame.snr - 148 ) >= SNR_THRESHOLD) || currentBasicCfg == CFG_COUNT-1;
 
                     if (!goodEnough)
                     {
@@ -133,23 +139,27 @@ void establishConnection(uint8_t sender, uint8_t receiver, bool master){
                     txInProgress = true;
                     LoRa.endPacket(true);
                     while(txInProgress) delay(1);
+                    lastConfig = configs[currentBasicCfg];
+                    currentConf = configs[currentBasicCfg];
                     connectionEstablished = true;
                     continue;
                 }
 
+                receivedConnectionFrame = false;
+
             } else if(now - lastCfgSwitch > CFG_SWITCH_INTERVAL){
-                currentCfg = (currentCfg + 1) % CFG_COUNT;
+                currentBasicCfg = (currentBasicCfg + 1) % CFG_COUNT;
 
                 Serial.print("[MASTER] switching cfg to index ");
-                Serial.println(currentCfg);
+                Serial.println(currentBasicCfg);
 
-                applyConfig(configs[currentCfg]);
+                applyConfig(configs[currentBasicCfg]);
 
                 lastCfgSwitch = now;
             } else {
  
                 Serial.print("[MASTER] sending SYN on cfg ");
-                Serial.println(currentCfg);
+                Serial.println(currentBasicCfg);
 
                 LoRa.beginPacket();
                 LoRa.write(destination);
@@ -181,8 +191,6 @@ void establishConnection(uint8_t sender, uint8_t receiver, bool master){
             if(!txInProgress && now >= nextTxTime){
             if (receivedConnectionFrame){
 
-                receivedConnectionFrame = false;
-
                 // MASTER → SYN
                 if (ConnectionFrame.flags == MSG_HS_SYN)
                 {
@@ -207,6 +215,9 @@ void establishConnection(uint8_t sender, uint8_t receiver, bool master){
                 else if (ConnectionFrame.flags == MSG_HS_ACK)
                 {
                     Serial.println("[SLAVE] got ACK - connection ready");
+                    
+                    lastConfig = configs[currentBasicCfg];
+                    currentConf = configs[currentBasicCfg];
                     connectionEstablished = true;
                 }
                 // MASTER → RST
@@ -215,13 +226,16 @@ void establishConnection(uint8_t sender, uint8_t receiver, bool master){
                 Serial.println("[SLAVE] got RST – master rejected config");
                 // continue scanning
                 }
+
+                receivedConnectionFrame = false;
+
             } else if (now - lastCfgSwitch > 2500){
-                currentCfg = (currentCfg + 1) % CFG_COUNT;
+                currentBasicCfg = (currentBasicCfg + 1) % CFG_COUNT;
 
                 Serial.print("[Slave] switching cfg to index ");
-                Serial.println(currentCfg);
+                Serial.println(currentBasicCfg);
 
-                applyConfig(configs[currentCfg]);
+                applyConfig(configs[currentBasicCfg]);
 
                 lastCfgSwitch = now;
             }
@@ -248,7 +262,7 @@ volatile unsigned long nextTxTime = 0;
 void onTxDone() {
   unsigned long now = millis();
   txInProgress = false;
-  nextTxTime = now + now - txStartTime + EXTRA_MARGIN_MS;
+  nextTxTime = now + (now - txStartTime) * DUTY_CYCLE + EXTRA_MARGIN_MS;
   Serial.print("TX done. duration(ms): "); Serial.print(now - txStartTime);
   Serial.print(" nextTxTime in(ms): "); Serial.println(now - txStartTime + EXTRA_MARGIN_MS);
 }
@@ -267,4 +281,33 @@ void applyConfig(const LoRaConfig_t conf) {
   Serial.print("Applied Config -> SF:"); Serial.print(conf.spreadingFactor);
   Serial.print(" BW_IDX:"); Serial.println(conf.bandwidth_index);
   Serial.println('\n\n');
+}
+
+/*------------------------------
+Recovery
+------------------------------*/
+
+#define RECOVERY_ATTEMPTS 3
+#define RECOVERY_INTERVAL PING_INTERVAL_MS
+uint8_t attemptedRecovery = 0;
+long lastRecoveryAttempted = 0;
+
+void recoveryStep(){
+    if(currentConf.txPower < 14){
+        currentConf.txPower ++;
+        applyConfig(currentConf);
+    } else if(currentConf.codingRate < 8){
+        currentConf.codingRate ++;
+        applyConfig(currentConf);
+    } else if(currentConf.spreadingFactor < 12){
+        currentConf.spreadingFactor ++;
+        applyConfig(currentConf);
+    }
+    lastConfig = currentConf;
+}
+
+void recoveryFallback(){
+    currentConf = configs[currentBasicCfg];
+    applyConfig(currentConf);
+    lastConfig = currentConf;
 }
