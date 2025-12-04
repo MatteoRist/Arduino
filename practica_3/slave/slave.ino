@@ -32,7 +32,7 @@ double bandwidth_kHz[10] = {
 };
 
 // 1. Default Robust Config (Fallback)
-const LoRaConfig_t defaultConf = { 0, 12, 8, 14 }; 
+const LoRaConfig_t defaultConf = { 0, 12, 8, 3 }; 
 
 // 2. Current Active Config
 LoRaConfig_t currentConf = defaultConf;

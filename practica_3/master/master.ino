@@ -2,8 +2,8 @@
 #include <LoRa.h>
 
 // --- IDs ---
-const uint8_t localAddress = 0xA1;   // Master
-const uint8_t destination  = 0xB1;   // Slave
+const uint8_t localAddress = 0xA2;   // Master
+const uint8_t destination  = 0xB2;   // Slave
 
 // --- Message Types ---
 const uint8_t MSG_PING       = 0x01; // Standard keep-alive
@@ -35,13 +35,16 @@ double bandwidth_kHz[10] = {
   41.7E3, 62.5E3, 125E3, 250E3, 500E3
 };
 
-// 1. Default Robust Config (Fallback)
-const LoRaConfig_t defaultConf = { 0, 12, 8, 14 }; 
+// Default Robust Config (Fallback)
+const LoRaConfig_t defaultConf = { 8, 9, 8, 5 }; 
 
-// 2. Current Active Config
+// Current Active Config
 LoRaConfig_t currentConf = defaultConf;
 
-// 3. Proposed Config (Pending application)
+// configuration memory system
+LoRaConfig_t lastConf = defaultConf;
+
+// Proposed Config (Pending application)
 LoRaConfig_t nextConf;
 bool hasPendingConfigChange = false;
 
@@ -72,14 +75,20 @@ void loop() {
 
   // 1. TIMEOUT CHECK / CONNECTION LOSS HANDLING
   if (waitingForReply && (currentMillis - msgSentTime > TIMEOUT_MS)) {
-    Serial.println("!!! TIMEOUT: Link Lost. Reverting to Defaults. !!!");
     
     // Reset state
     waitingForReply = false;
     hasPendingConfigChange = false;
     
     // Force revert to default robust settings
-    currentConf = defaultConf;
+    if (memcmp(&currentConf, &lastConf, sizeof(LoRaConfig_t)) != 0){
+      Serial.println("!!! TIMEOUT: Link Lost. Reverting to Last Config. !!!");
+      currentConf = lastConf;
+    }else{
+      Serial.println("!!! TIMEOUT: Link Lost. Reverting to Default. !!!");
+      currentConf = defaultConf;
+    }
+    
     applyConfig(currentConf);
     
     // Add a small random delay to desynchronize slightly if needed
@@ -185,11 +194,14 @@ void onReceive(int packetSize) {
       Serial.println("<- ACK Received. Slave updated.");
       
       // The Slave accepted the config, now WE apply it
+      lastConf = currentConf;
       currentConf = nextConf;
       applyConfig(currentConf);
       
       Serial.println("*** Local Configuration Updated ***");
       hasPendingConfigChange = false;
+
+       
     }
   }
 }
@@ -235,8 +247,8 @@ void applyConfig(LoRaConfig_t conf) {
   LoRa.setSpreadingFactor(conf.spreadingFactor);
   LoRa.setCodingRate4(conf.codingRate);
   LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
-  LoRa.setSyncWord(0x12);
-  LoRa.setPreambleLength(12);
+  LoRa.setSyncWord(0x22);
+  LoRa.setPreambleLength(14);
   Serial.print("Applied Config -> SF:"); Serial.print(conf.spreadingFactor);
   Serial.print(" BW_IDX:"); Serial.println(conf.bandwidth_index);
 }
@@ -248,4 +260,24 @@ uint8_t encodeConfig(LoRaConfig_t conf, uint8_t* payload) {
   payload[len]    = ((conf.codingRate - 5) << 6);
   payload[len++] |= ((conf.txPower - 2) << 1);
   return len;
+}
+
+// Helper function to print the struct fields
+void printStruct(const LoRaConfig_t& config) {
+  Serial.println(F("------ LoRa Config ------"));
+  
+  // We cast to (int) to ensure it prints the number, not the ASCII character
+  Serial.print(F("Bandwidth Index:  "));
+  Serial.println((int)config.bandwidth_index);
+  
+  Serial.print(F("Spreading Factor: "));
+  Serial.println((int)config.spreadingFactor);
+  
+  Serial.print(F("Coding Rate:      "));
+  Serial.println((int)config.codingRate);
+  
+  Serial.print(F("TX Power:         "));
+  Serial.println((int)config.txPower);
+  
+  Serial.println(F("-------------------------"));
 }
