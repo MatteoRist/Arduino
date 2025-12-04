@@ -227,24 +227,14 @@ inline void analyzeTest(){
           lastActionTime = nowt;
         } else{
           sendingSecondTest = true;
-          state = RECUPERATION_MODE;
+          state = IDLE;
+          mode = RECUPERATION_MODE;
           lastActionTime = nowt;
         }
         return;
       } else { // == 100%
         Serial.println("> 100% -> candidate to increase speed");
-        // try to speed up
-        nextConf = currentConf;
-        if (nextConf.spreadingFactor > 7) {
-          nextConf.spreadingFactor--;
-          doChange = true;
-        } else if (nextConf.bandwidth_index < 9) {
-          nextConf.bandwidth_index++;
-          doChange = true;
-        } else if (nextConf.txPower > 2) {
-          nextConf.txPower--; // reduce power if possible
-          doChange = true;
-        }
+        standardChangeWithStableCommunication(doChange);
       }
 
       // throttle changes
@@ -265,10 +255,39 @@ inline void analyzeTest(){
         mode = SEND_CONFIG_WITHOUT_ACK;
         configSentTimestamp = millis();
         LoRa.endPacket(true);
-        sendingSecondTest = false
+        sendingSecondTest = false;
       } else {
         Serial.println("No config change or change too recent.");
         state = IDLE;
-        sendingSecondTest = false
+        sendingSecondTest = false;
+      }
+}
+
+inline void standardChangeWithStableCommunication(bool &doChange){
+
+        nextConf = currentConf;
+        if(lowestTestedRSSIPing < RSSI_THRESHOLD){
+          if(nextConf.txPower < 14){
+            nextConf.txPower++;
+          }
+        }else if(lowestTestedSNRPing < SNR_THRESHOLD){
+          if(nextConf.bandwidth_index > 5){
+            nextConf.bandwidth_index--;
+          }
+        }else{
+        // try to speed up
+        if(nextConf.codingRate > 5){
+          nextConf.codingRate--;
+        }
+        else if (nextConf.spreadingFactor > 7) {
+          nextConf.spreadingFactor--;
+          doChange = true;
+        } else if (nextConf.bandwidth_index < 9) {
+          nextConf.bandwidth_index++;
+          doChange = true;
+        } else if (nextConf.txPower > 2) {
+          nextConf.txPower--; // reduce power if possible
+          doChange = true;
+        }
       }
 }

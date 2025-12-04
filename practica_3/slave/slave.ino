@@ -1,6 +1,6 @@
 #include <SPI.h>
 #include <LoRa.h>
-#include "../master/networking.h"
+#include "networking.h"
 
 
 volatile uint8_t lastPingId = 255;
