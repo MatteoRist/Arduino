@@ -1,53 +1,50 @@
 #include <SPI.h>
 #include <LoRa.h>
+#include "networking.h"
 
-// --- IDs ---
+
+
+// ---- IDs ----
 const uint8_t localAddress = 0xA1;   // Master
 const uint8_t destination  = 0xB1;   // Slave
 
-// --- Message Types ---
-const uint8_t MSG_PING       = 0x01; // Standard keep-alive
-const uint8_t MSG_PONG       = 0x02; // Response to PING
-const uint8_t MSG_CONFIG     = 0x03; // Command to change settings
-const uint8_t MSG_ACK        = 0x04; // Acknowledge config change
+// ---- Config type ----
 
-// --- Timing ---
-const unsigned long TIMEOUT_MS = 10000;  
-const unsigned long PING_INTERVAL = 2000;   // Wait between cycles
-unsigned long lastActionTime = 0;
 
-// --- Thresholds for link quality ---
-// If signal is stronger than this, we try to optimize speed
-const int RSSI_THRESHOLD = -90;   // dBm 
-const int SNR_THRESHOLD  = 8;     // dB
 
-// --- Configuration ---
-typedef struct {
-  uint8_t bandwidth_index;
-  uint8_t spreadingFactor;
-  uint8_t codingRate;
-  uint8_t txPower;
-} LoRaConfig_t;
 
-// Bandwidth lookup
-double bandwidth_kHz[10] = {
-  7.8E3, 10.4E3, 15.6E3, 20.8E3, 31.25E3,
-  41.7E3, 62.5E3, 125E3, 250E3, 500E3
-};
-
-// 1. Default Robust Config (Fallback)
-const LoRaConfig_t defaultConf = { 0, 12, 8, 14 }; 
-
-// 2. Current Active Config
+// Default
+const LoRaConfig_t defaultConf = { 8, 9, 8, 2 };
 LoRaConfig_t currentConf = defaultConf;
-
-// 3. Proposed Config (Pending application)
 LoRaConfig_t nextConf;
 bool hasPendingConfigChange = false;
 
-// State tracking
-bool waitingForReply = false;
+// ---- State machine ----
+enum MasterState { IDLE, SENDING_TEST, WAITING_PONGS, SENDING_FINAL, ANALYZE_IDLE };
+MasterState state = IDLE;
+
+unsigned long lastActionTime = 0;
 unsigned long msgSentTime = 0;
+
+
+// Test tracking
+uint8_t test_id = TEST_ID_MAIN;
+uint8_t ping_sent = 0;
+uint8_t pongs_received = 0;
+unsigned long testStartTime = 0;
+
+// thresholds
+const int RSSI_THRESHOLD = -90;
+const int SNR_THRESHOLD  = -5;
+
+// ---- function prototypes ----
+void onReceive(int packetSize);
+void onTxDone();
+void sendPing(uint8_t testId, uint8_t pingId);
+void sendFinalPing(uint8_t finalCount);
+void applyConfig(LoRaConfig_t conf);
+uint8_t encodeConfig(LoRaConfig_t conf, uint8_t* payload);
+void checkForOptimization(int remoteRSSI, int remoteSNR);
 
 void setup() {
   Serial.begin(9600);
@@ -58,176 +55,208 @@ void setup() {
     while (true);
   }
 
-  // Initial setup
-  applyConfig(currentConf);
-  
   LoRa.onReceive(onReceive);
+  LoRa.onTxDone(onTxDone);
   LoRa.receive();
 
+  applyConfig(currentConf);
   Serial.println("Master ready. Using Default Config.");
+  state = IDLE;
+  lastActionTime = millis();
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
+  unsigned long now = millis();
 
-  // 1. TIMEOUT CHECK / CONNECTION LOSS HANDLING
-  if (waitingForReply && (currentMillis - msgSentTime > TIMEOUT_MS)) {
-    Serial.println("!!! TIMEOUT: Link Lost. Reverting to Defaults. !!!");
-    
-    // Reset state
-    waitingForReply = false;
-    hasPendingConfigChange = false;
-    
-    // Force revert to default robust settings
-    currentConf = defaultConf;
-    applyConfig(currentConf);
-    
-    // Add a small random delay to desynchronize slightly if needed
-    delay(1000); 
-    return;
+  // TIMEOUT if waiting for pongs too long
+  if (state == WAITING_PONGS && (now - testStartTime > TIMEOUT_MS)) {
+    Serial.println("Timeout waiting for PONGs. Analyzing what arrived.");
+    state = ANALYZE_IDLE;
   }
 
-  // 2. SENDING LOGIC (If not waiting for reply and interval passed)
-  if (!waitingForReply && (currentMillis - lastActionTime > PING_INTERVAL)) {
-    
-    if (hasPendingConfigChange) {
-      // If we calculated a better config previously, send it now
-      sendConfigCommand(nextConf);
-    } else {
-      // Otherwise, just send a standard PING
-      sendPing();
+  // If tx is in progress, we wait for onTxDone to schedule next time.
+  // Only send if not txInProgress and now >= nextTxTime
+  if (!txInProgress && now >= nextTxTime) {
+    if (state == IDLE && (now - lastActionTime > PING_INTERVAL_MS)) {
+      // start a test
+      Serial.println("Starting new multi-PING test");
+      state = SENDING_TEST;
+      test_id = TEST_ID_MAIN;
+      ping_sent = 0;
+      pongs_received = 0;
     }
-    
-    lastActionTime = currentMillis;
+
+    if (state == SENDING_TEST) {
+      if (ping_sent < PING_COUNT) {
+        sendPing(test_id, ping_sent);
+        ping_sent++;
+        // after sending last ping, go to wait
+        if (ping_sent == PING_COUNT) {
+          state = WAITING_PONGS;
+          testStartTime = millis();
+        }
+      }
+    } else if (state == SENDING_FINAL) {
+      // send single final ping containing how many pongs we received
+      sendFinalPing(pongs_received);
+      state = ANALYZE_IDLE;
+    } else if (state == ANALYZE_IDLE) {
+      // analyze results and decide config changes
+      float ratio = (float)pongs_received / (float)PING_COUNT;
+      Serial.print("Test done. PONG ratio: "); Serial.println(ratio);
+
+      unsigned long nowt = millis();
+      bool doChange = false;
+      if (ratio < 0.5f) {
+        Serial.println("Ratio < 50% -> reduce speed / increase reliability.");
+        // plan to increase reliability (example: increase SF or reduce BW)
+        // nextConf = currentConf;
+        // if (nextConf.spreadingFactor < 12) {
+          // nextConf.spreadingFactor++;
+          // doChange = true;
+        // } else if (nextConf.bandwidth_index > 0) {
+          // nextConf.bandwidth_index--;
+          // doChange = true;
+        // } else {
+          // increase tx power if possible
+          // if (nextConf.txPower < 20) { nextConf.txPower++; doChange = true; }
+        // }
+      } else if (ratio >= 0.5f && ratio <= 0.9f) {
+        Serial.println("50%-90% -> repeat test once more before decisions.");
+        // schedule a repeat of the test (do nothing now, will restart test next loop)
+        state = IDLE;
+        lastActionTime = nowt;
+        delay(10);
+        return;
+      } else { // > 0.9
+        Serial.println("> 90% -> candidate to increase speed");
+        // try to speed up
+        nextConf = currentConf;
+        if (nextConf.spreadingFactor > 7) {
+          nextConf.spreadingFactor--;
+          doChange = true;
+        } else if (nextConf.bandwidth_index < 9) {
+          nextConf.bandwidth_index++;
+          doChange = true;
+        } else if (nextConf.txPower > 2) {
+          nextConf.txPower--; // reduce power if possible
+          doChange = true;
+        }
+      }
+
+      // throttle changes
+      static unsigned long lastChangeTime = 0;
+      if (doChange && (nowt - lastChangeTime) > MIN_TIME_BETWEEN_CFG_CHANGES_MS) {
+        Serial.println("Proposing config change: will send CONFIG to slave.");
+        hasPendingConfigChange = true;
+        lastChangeTime = nowt;
+        // send config (will be sent in next loop as part of state machine)
+        state = SENDING_FINAL; // first let master send final ping to notify slave of results
+      } else {
+        Serial.println("No config change or change too recent.");
+        state = IDLE;
+      }
+    } else if (state == WAITING_PONGS) {
+      // nothing; wait for pongs or timeout
+    }
   }
 }
 
-// --- Transmission Functions ---
+// --- TX / RX / helpers ---
 
-void sendPing() {
-  Serial.println("-> Sending PING");
-  
-  LoRa.beginPacket();
-  LoRa.write(destination);
-  LoRa.write(localAddress);
-  LoRa.write(MSG_PING); 
-  LoRa.write(0); // Payload length 0 for basic PING
-  LoRa.endPacket();
-
-  msgSentTime = millis();
-  waitingForReply = true;
-  LoRa.receive();
+void onTxDone() {
+  // called from ISR context typically
+  unsigned long now = millis();
+  lastTxDuration = now - txStartTime;
+  txInProgress = false;
+  nextTxTime = now + lastTxDuration + EXTRA_MARGIN_MS;
+  LoRa.receive(); // go back to receive mode
+  Serial.print("TX done. duration(ms): "); Serial.print(lastTxDuration);
+  Serial.print(" nextTxTime in(ms): "); Serial.println(lastTxDuration + EXTRA_MARGIN_MS);
 }
-
-void sendConfigCommand(LoRaConfig_t newConf) {
-  Serial.println("-> Sending NEW CONFIGURATION");
-  
-  uint8_t payload[10];
-  uint8_t len = encodeConfig(newConf, payload);
-
-  LoRa.beginPacket();
-  LoRa.write(destination);
-  LoRa.write(localAddress);
-  LoRa.write(MSG_CONFIG); 
-  LoRa.write(len);
-  LoRa.write(payload, len);
-  LoRa.endPacket();
-
-  msgSentTime = millis();
-  waitingForReply = true;
-  LoRa.receive();
-}
-
-// --- Receive Handler ---
 
 void onReceive(int packetSize) {
   if (packetSize == 0) return;
 
-  // Read header
   int recipient = LoRa.read();
   int sender    = LoRa.read();
   uint8_t msgId = LoRa.read();
   uint8_t incomingLength = LoRa.read();
 
   if (recipient != localAddress) return;
-
-  // Read Payload
+  Serial.print("SNR  ==");Serial.print(LoRa.packetSnr());
+  Serial.print("  RSSI =="); Serial.println(LoRa.rssi());
+  // read payload
   uint8_t buffer[10];
-  uint8_t receivedBytes = 0;
-  while (LoRa.available() && (receivedBytes < sizeof(buffer))) {
-    buffer[receivedBytes++] = (char)LoRa.read();
+  uint8_t rcvd = 0;
+  while (LoRa.available() && rcvd < sizeof(buffer)) {
+    buffer[rcvd++] = (uint8_t)LoRa.read();
   }
 
-  // Handle Response Types
-  if (waitingForReply) {
-    
-    // Case A: PONG received (Response to PING)
-    if (msgId == MSG_PONG) {
-      waitingForReply = false;
-      unsigned long rtt = millis() - msgSentTime;
+  if (msgId == MSG_PONG) {
+    // PONG payload format: [ test_id, count_received ]
+    if (rcvd >= 2) {
+      uint8_t t_id = buffer[0];
+      uint8_t received = buffer[1];
+      Serial.print("<- PONG from "); Serial.print(sender, HEX);
+      Serial.print(" test_id:"); Serial.print(t_id);
+      Serial.print(" got_count:"); Serial.println(received);
 
-      // Extract SNR/RSSI from packet telemetry (assuming slave sent them back)
-      // Note: Assuming Slave sends [RSSI, SNR] as first 2 bytes of payload
-      int remoteRSSI = -int(buffer[0]) / 2; // Example decoding
-      int remoteSNR  = int(buffer[1]) - 148; 
-
-      Serial.print("<- PONG | RTT: "); Serial.print(rtt);
-      Serial.print(" | Remote RSSI: "); Serial.print(remoteRSSI);
-      Serial.print(" | Remote SNR: "); Serial.println(remoteSNR);
-
-      // Check if we can improve settings for the NEXT transmission
-      checkForOptimization(remoteRSSI, remoteSNR);
+      if (t_id == TEST_ID_MAIN) {
+        pongs_received = received; // slave tells how many pings it received so far
+        // after receiving first PONG we might still be waiting for more PONGs
+        // If slave sends only summary PONGs (e.g. incremental), we accept the latest value.
+      }
     }
-
-    // Case B: ACK received (Response to CONFIG request)
-    else if (msgId == MSG_ACK) {
-      waitingForReply = false;
-      Serial.println("<- ACK Received. Slave updated.");
-      
-      // The Slave accepted the config, now WE apply it
+  } else if (msgId == MSG_ACK) {
+    // Slave ACK to CONFIG
+    Serial.println("<- ACK received. Slave applied config. Applying locally.");
+    // If we had a pending config, apply it locally
+    if (hasPendingConfigChange) {
       currentConf = nextConf;
       applyConfig(currentConf);
-      
-      Serial.println("*** Local Configuration Updated ***");
       hasPendingConfigChange = false;
     }
   }
 }
 
-// --- Logic Helpers ---
+void sendPing(uint8_t testId, uint8_t pingId) {
+  // payload: [testId, pingId]
+  uint8_t payload[2];
+  payload[0] = testId;
+  payload[1] = pingId;
 
-void checkForOptimization(int rssi, int snr) {
-  // Reset pending flag initially
-  hasPendingConfigChange = false;
-  
-  // Copy current to next as a base
-  nextConf = currentConf; 
-  bool changeNeeded = false;
+  LoRa.beginPacket();
+  LoRa.write(destination);
+  LoRa.write(localAddress);
+  LoRa.write(MSG_PING);
+  LoRa.write(2); // len
+  LoRa.write(payload, 2);
+  LoRa.endPacket(true);
 
-  // LOGIC: If signal is very strong, increase data rate (lower SF, higher BW)
-  if (rssi > RSSI_THRESHOLD && snr > SNR_THRESHOLD) {
-    
-    // 1. Try to lower Spreading Factor
-    if (nextConf.spreadingFactor > 7) {
-      nextConf.spreadingFactor--;
-      changeNeeded = true;
-      Serial.print("(Plan) Reduce SF to "); Serial.println(nextConf.spreadingFactor);
-    } 
-    // 2. If SF is low, try to increase Bandwidth
-    else if (nextConf.bandwidth_index < 9) {
-      nextConf.bandwidth_index++;
-      changeNeeded = true;
-      Serial.print("(Plan) Increase BW to index "); Serial.println(nextConf.bandwidth_index);
-    }
-  }
-  
-  // You could add logic here to DECREASE speed if RSSI is bad, 
-  // but usually the Timeout/Reset to Default handles the "bad link" scenario best.
+  txInProgress = true;
+  txStartTime = millis();
+  msgSentTime = txStartTime;
+  Serial.print("-> Sent PING id: "); Serial.println(pingId);
+}
 
-  if (changeNeeded) {
-    hasPendingConfigChange = true;
-    Serial.println("Optimization found. Next packet will send Config.");
-  }
+void sendFinalPing(uint8_t finalCount) {
+  // payload: [TEST_ID_FINAL, finalCount]
+  uint8_t payload[2];
+  payload[0] = TEST_ID_FINAL;
+  payload[1] = finalCount;
+
+  LoRa.beginPacket();
+  LoRa.write(destination);
+  LoRa.write(localAddress);
+  LoRa.write(MSG_PING);
+  LoRa.write(2);
+  LoRa.write(payload, 2);
+  LoRa.endPacket(true);
+
+  txInProgress = true;
+  txStartTime = millis();
+  Serial.print("-> Sent FINAL PING with count: "); Serial.println(finalCount);
 }
 
 void applyConfig(LoRaConfig_t conf) {
@@ -239,8 +268,10 @@ void applyConfig(LoRaConfig_t conf) {
   LoRa.setPreambleLength(12);
   Serial.print("Applied Config -> SF:"); Serial.print(conf.spreadingFactor);
   Serial.print(" BW_IDX:"); Serial.println(conf.bandwidth_index);
+  Serial.println('\n\n');
 }
 
+// Encode config into payload, returning length
 uint8_t encodeConfig(LoRaConfig_t conf, uint8_t* payload) {
   uint8_t len = 0;
   payload[len]    = (conf.bandwidth_index << 4);
