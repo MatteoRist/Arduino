@@ -77,7 +77,7 @@ void loop() {
         shouldSendPong = false;
         lastMsgGotTS = millis();
         mode = SAFE;
-
+        if(lastPingId & 0x7F > 0) analyzePings();
       }
       // Sending acknowledge to master 
       else if(shouldSendACK){
@@ -171,27 +171,19 @@ inline void decodeConfig(uint8_t* payload) {
   nextConf.txPower         = ((payload[1] >> 1) & 0x1F) + 2;
 }
 
-inline void getSignalBack(){
+void analyzePings() {
+    float ratio = lastPingPongReceived / (float) (lastPingId & 0x7F) ;
 
-  if(currentConf.bandwidth_index  == lastConfig.bandwidth_index &&
-     currentConf.spreadingFactor  == lastConfig.spreadingFactor &&
-     currentConf.codingRate  == lastConfig.codingRate &&
-     currentConf.txPower  == lastConfig.txPower){
-
-      if(millis() - lastRecoveryAttempted > RECOVERY_INTERVAL){
-        if(attemptedRecovery < RECOVERY_ATTEMPTS){
-          recoveryStep();
-          attemptedRecovery++;
-        } else if(attemptedRecovery == RECOVERY_ATTEMPTS){
-          recoveryFallback();
-          attemptedRecovery++;
-        } else{
-          establishConnection();
+    if(ratio <= 0.5f){
+        mode = RECUPERATION_MODE;
+    } else if(ratio > 0.5f && ratio < 1){
+        if(lastPingId >= 126){
+        mode = RECUPERATION_MODE;
         }
-      }
-  } else{
-    currentConf = lastConfig;
-    applyConfig(currentConf);
-    lastRecoveryAttempted = millis();
-  }
+    } else {
+        mode = SAFE;
+    }
+
+    received_count = 0;
 }
+

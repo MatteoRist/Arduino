@@ -287,8 +287,8 @@ void applyConfig(const LoRaConfig_t conf) {
 Recovery
 ------------------------------*/
 
-#define RECOVERY_ATTEMPTS 3
-#define RECOVERY_INTERVAL PING_INTERVAL_MS
+#define RECOVERY_ATTEMPTS 2
+#define RECOVERY_INTERVAL PING_INTERVAL_MS*2
 uint8_t attemptedRecovery = 0;
 long lastRecoveryAttempted = 0;
 
@@ -310,4 +310,32 @@ void recoveryFallback(){
     currentConf = configs[currentBasicCfg];
     applyConfig(currentConf);
     lastConfig = currentConf;
+}
+
+inline void getSignalBack(){
+
+  if(currentConf.bandwidth_index  == lastConfig.bandwidth_index &&
+     currentConf.spreadingFactor  == lastConfig.spreadingFactor &&
+     currentConf.codingRate  == lastConfig.codingRate &&
+     currentConf.txPower  == lastConfig.txPower){
+
+      if(millis() - lastRecoveryAttempted > RECOVERY_INTERVAL){
+        if(attemptedRecovery < RECOVERY_ATTEMPTS){
+          recoveryStep();
+          attemptedRecovery++;
+          lastRecoveryAttempted = millis();
+        } else if(attemptedRecovery == RECOVERY_ATTEMPTS){
+          recoveryFallback();
+          attemptedRecovery++;
+          lastRecoveryAttempted = millis();
+        } else{
+          establishConnection();
+        }
+      }
+  } else{
+    currentConf = lastConfig;
+    applyConfig(currentConf);
+    lastRecoveryAttempted = millis();
+    attemptedRecovery = 0;
+  }
 }
