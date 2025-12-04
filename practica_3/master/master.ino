@@ -7,9 +7,10 @@ const uint8_t destination  = 0xB2;   // Slave
 
 // --- Message Types ---
 const uint8_t MSG_PING       = 0x01; // Standard keep-alive
-const uint8_t MSG_PONG       = 0x02; // Response to PING
+const uint8_t MSG_PONG       = 0x02; // (Depreciated in Burst Mode)
 const uint8_t MSG_CONFIG     = 0x03; // Command to change settings
 const uint8_t MSG_ACK        = 0x04; // Acknowledge config change
+const uint8_t MSG_REPORT     = 0x05; // New: Summary report from Slave
 
 // --- Timing ---
 const unsigned long TIMEOUT_MS = 10000;  
@@ -17,9 +18,13 @@ const unsigned long PING_INTERVAL = 2000;   // Wait between cycles
 unsigned long lastActionTime = 0;
 
 // --- Thresholds for link quality ---
-// If signal is stronger than this, we try to optimize speed
 const int RSSI_THRESHOLD = -90;   // dBm 
 const int SNR_THRESHOLD  = 8;     // dB
+
+// --- Burst Configuration ---
+const int BURST_SIZE = 4;         // How many packets per Ping cycle
+uint8_t currentBatchId = 0;       // To identify specific bursts
+bool reportReceivedThisCycle = false; // De-duplication flag
 
 // --- Configuration ---
 typedef struct {
@@ -103,8 +108,8 @@ void loop() {
       // If we calculated a better config previously, send it now
       sendConfigCommand(nextConf);
     } else {
-      // Otherwise, just send a standard PING
-      sendPing();
+      // Send the BURST of 4 packets
+      sendPingBurst();
     }
     
     lastActionTime = currentMillis;
@@ -113,15 +118,32 @@ void loop() {
 
 // --- Transmission Functions ---
 
-void sendPing() {
-  Serial.println("-> Sending PING");
+void sendPingBurst() {
+  Serial.println("-> Sending BURST PING (4 pkts)");
   
-  LoRa.beginPacket();
-  LoRa.write(destination);
-  LoRa.write(localAddress);
-  LoRa.write(MSG_PING); 
-  LoRa.write(0); // Payload length 0 for basic PING
-  LoRa.endPacket();
+  // Increment Batch ID so Slave knows these 4 belong together
+  currentBatchId++;
+  
+  // Reset the de-duplication flag for the new cycle
+  reportReceivedThisCycle = false;
+
+  // Send 4 packets rapidly
+  for (int i = 0; i < BURST_SIZE; i++) {
+      LoRa.beginPacket();
+      LoRa.write(destination);
+      LoRa.write(localAddress);
+      LoRa.write(MSG_PING); 
+      
+      // Payload for Burst Tracking
+      LoRa.write(currentBatchId); // Which batch is this?
+      LoRa.write(i);              // Which number is this? (0-3)
+      LoRa.write(BURST_SIZE);     // Total size (4)
+      
+      LoRa.endPacket();
+      
+      // Small delay to prevent overwhelming the receiver buffer
+      delay(20); 
+  }
 
   msgSentTime = millis();
   waitingForReply = true;
@@ -170,22 +192,29 @@ void onReceive(int packetSize) {
   // Handle Response Types
   if (waitingForReply) {
     
-    // Case A: PONG received (Response to PING)
-    if (msgId == MSG_PONG) {
+    // Case A: REPORT received
+    if (msgId == MSG_REPORT) {
+      
+      // DE-DUPLICATION: If we already got a report for this burst, ignore this one.
+      if (reportReceivedThisCycle) return;
+      
+      reportReceivedThisCycle = true;
       waitingForReply = false;
       unsigned long rtt = millis() - msgSentTime;
 
-      // Extract SNR/RSSI from packet telemetry (assuming slave sent them back)
-      // Note: Assuming Slave sends [RSSI, SNR] as first 2 bytes of payload
-      int remoteRSSI = -int(buffer[0]) / 2; // Example decoding
-      int remoteSNR  = int(buffer[1]) - 148; 
+      // Extract Report Data
+      // Payload: [PacketsReceived, AvgRSSI, AvgSNR]
+      int packetsReceived = (int)buffer[0];
+      int remoteRSSI      = -int(buffer[1]); // Assuming slave sent abs() value
+      int remoteSNR       = int(buffer[2]); 
 
-      Serial.print("<- PONG | RTT: "); Serial.print(rtt);
-      Serial.print(" | Remote RSSI: "); Serial.print(remoteRSSI);
-      Serial.print(" | Remote SNR: "); Serial.println(remoteSNR);
+      Serial.print("<- REPORT | Pkts: "); Serial.print(packetsReceived);
+      Serial.print("/"); Serial.print(BURST_SIZE);
+      Serial.print(" | RSSI: "); Serial.print(remoteRSSI);
+      Serial.print(" | SNR: "); Serial.println(remoteSNR);
 
-      // Check if we can improve settings for the NEXT transmission
-      checkForOptimization(remoteRSSI, remoteSNR);
+      // Optimize based on STABILITY (packet count) and QUALITY (rssi/snr)
+      checkForOptimization(packetsReceived, remoteRSSI, remoteSNR);
     }
 
     // Case B: ACK received (Response to CONFIG request)
@@ -199,24 +228,29 @@ void onReceive(int packetSize) {
       applyConfig(currentConf);
       
       Serial.println("*** Local Configuration Updated ***");
-      hasPendingConfigChange = false;
-
-       
+      hasPendingConfigChange = false;  
     }
   }
 }
 
 // --- Logic Helpers ---
 
-void checkForOptimization(int rssi, int snr) {
+// UPDATED: Now takes packetCount to ensure link stability
+void checkForOptimization(int packetsReceived, int rssi, int snr) {
   // Reset pending flag initially
   hasPendingConfigChange = false;
   
+  // GUARD CLAUSE: If we lost packets, the link is not stable enough to upgrade.
+  if (packetsReceived < BURST_SIZE) {
+    Serial.println("(Stability) Packet loss detected. Holding current config.");
+    return;
+  }
+
   // Copy current to next as a base
   nextConf = currentConf; 
   bool changeNeeded = false;
 
-  // LOGIC: If signal is very strong, increase data rate (lower SF, higher BW)
+  // LOGIC: If signal is very strong AND packet rate is 100%
   if (rssi > RSSI_THRESHOLD && snr > SNR_THRESHOLD) {
     
     // 1. Try to lower Spreading Factor
@@ -232,9 +266,6 @@ void checkForOptimization(int rssi, int snr) {
       Serial.print("(Plan) Increase BW to index "); Serial.println(nextConf.bandwidth_index);
     }
   }
-  
-  // You could add logic here to DECREASE speed if RSSI is bad, 
-  // but usually the Timeout/Reset to Default handles the "bad link" scenario best.
 
   if (changeNeeded) {
     hasPendingConfigChange = true;
