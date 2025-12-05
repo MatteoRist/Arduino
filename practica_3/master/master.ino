@@ -197,10 +197,12 @@ void sendPing(uint8_t pingId, uint8_t pongReceived) {
   LoRa.write(MSG_PING);
   LoRa.write(pingId);
   LoRa.write(pongReceived);
-  LoRa.endPacket(true);
 
   txInProgress = true;
   txStartTime = millis();
+  LoRa.endPacket(true);
+
+  
 // #if SERIAL_DBG
   // Serial.print("-> Sent PING id: "); Serial.print(pingId);
   Serial.print("   Pong received "); Serial.print(pongReceived);
@@ -269,6 +271,8 @@ inline void analyzeTest(){
         LoRa.write(encodedConfig[1]);
         mode = SEND_CONFIG_WITHOUT_ACK;
         configSentTimestamp = millis();
+        txInProgress = true;
+        txStartTime = millis();
         LoRa.endPacket(true);
         sendingSecondTest = false;
       } else {

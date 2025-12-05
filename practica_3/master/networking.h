@@ -74,7 +74,7 @@ const double bandwidth_kHz[10] = {
 /*------------------------------
 Tx logic
 ------------------------------*/
-
+#define MAX_TX_NEXT_WAITING 2000
 volatile bool txInProgress = false;
 volatile unsigned long txStartTime = 0;
 volatile unsigned long nextTxTime = 0;
@@ -83,10 +83,9 @@ void onTxDone() {
   LoRa.receive();
   unsigned long now = millis();
   txInProgress = false;
-  nextTxTime = now + (now - txStartTime) * DUTY_CYCLE + EXTRA_MARGIN_MS;
+  nextTxTime = now + min((now - txStartTime) * DUTY_CYCLE + EXTRA_MARGIN_MS, MAX_TX_NEXT_WAITING);
 //   Serial.print("TX done. duration(ms): "); Serial.print(now - txStartTime);
 //   Serial.print(" nextTxTime in(ms): "); Serial.println(now - txStartTime + EXTRA_MARGIN_MS);
-
 }
 
 /*------------------------------
