@@ -280,7 +280,7 @@ helper funcitons
 ------------------------------*/
 
 void applyConfig(const LoRaConfig_t conf) {
-  LoRa.idle();
+
   LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
   LoRa.setSpreadingFactor(conf.spreadingFactor);
   LoRa.setCodingRate4(conf.codingRate);
@@ -291,7 +291,7 @@ void applyConfig(const LoRaConfig_t conf) {
   Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
   Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate);
   Serial.println('\n\n');
-  LoRa.receive();
+
 }
 
 /*------------------------------
