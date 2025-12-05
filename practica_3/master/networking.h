@@ -11,13 +11,24 @@
 #define PING_COUNT 4
 #define EXTRA_MARGIN_MS 100
 #define TIMEOUT_MS 10000UL
-#define PING_INTERVAL_MS 2000UL
+#define PING_INTERVAL_MS 10000UL
 #define MIN_TIME_BETWEEN_CFG_CHANGES_MS 15000UL
-#define DUTY_CYCLE 1
+#define DUTY_CYCLE 100
 
 
 uint8_t localAddress;
 uint8_t destination;
+
+
+void LoRa_rxMode(){
+  LoRa.disableInvertIQ();               // normal mode
+  LoRa.receive();                       // set receive mode
+}
+
+void LoRa_txMode(){
+  LoRa.idle();                          // set standby mode
+  LoRa.enableInvertIQ();                // active invert I and Q signals
+}
 
 /*------------------------------
 Debug messege types
@@ -69,11 +80,13 @@ volatile unsigned long txStartTime = 0;
 volatile unsigned long nextTxTime = 0;
 
 void onTxDone() {
+  LoRa.receive();
   unsigned long now = millis();
   txInProgress = false;
   nextTxTime = now + (now - txStartTime) * DUTY_CYCLE + EXTRA_MARGIN_MS;
-  Serial.print("TX done. duration(ms): "); Serial.print(now - txStartTime);
-  Serial.print(" nextTxTime in(ms): "); Serial.println(now - txStartTime + EXTRA_MARGIN_MS);
+//   Serial.print("TX done. duration(ms): "); Serial.print(now - txStartTime);
+//   Serial.print(" nextTxTime in(ms): "); Serial.println(now - txStartTime + EXTRA_MARGIN_MS);
+
 }
 
 /*------------------------------
@@ -81,9 +94,9 @@ Scanning two defices
 ------------------------------*/
 
 const LoRaConfig_t configs[] = {
-    {8, 7,  6, 2},   // fast but least reliable
-    {7, 9,  7, 6},
-    {6, 12, 8, 10},   // very reliable, slow 
+    {8, 7,  8, 2},    // fast but least reliable
+    // {7, 9,  7, 6},
+    // {6, 12, 8, 10},   // very reliable, slow 
 };
 
 int currentBasicCfg;
@@ -116,7 +129,7 @@ void establishConnection(){
     /*------------------------------
     Master logic
     ------------------------------*/
-    CFG_SWITCH_INTERVAL = 200;
+    CFG_SWITCH_INTERVAL = 600;
 
     while(!connectionEstablished){
 
@@ -135,6 +148,7 @@ void establishConnection(){
                     {
                         Serial.println("[MASTER] RSSI/SNR too weak -> rejecting config");
                         // Send a RST frame (just use MSG_ACK with flag=0xEE)
+                        LoRa.idle(); 
                         LoRa.beginPacket();
                         LoRa.write(destination);
                         LoRa.write(localAddress);
@@ -150,7 +164,7 @@ void establishConnection(){
 
                     // Otherwise, send ACK → connection established
                     Serial.println("[MASTER] sending ACK – connection established");
-
+                    LoRa.idle(); 
                     LoRa.beginPacket();
                     LoRa.write(destination);
                     LoRa.write(localAddress);
@@ -165,25 +179,24 @@ void establishConnection(){
                     lastConfig = configs[currentBasicCfg];
                     currentConf = configs[currentBasicCfg];
                     connectionEstablished = true;
-                    continue;
                 }
-
+                ConnectionFrame.flags = 0x00;
                 receivedConnectionFrame = false;
 
-            } else if(now - lastCfgSwitch > CFG_SWITCH_INTERVAL){
-                currentBasicCfg = (currentBasicCfg + 1) % CFG_COUNT;
-
-                Serial.print("[MASTER] switching cfg to index ");
-                Serial.println(currentBasicCfg);
-
-                applyConfig(configs[currentBasicCfg]);
-
-                lastCfgSwitch = now;
+            // } else if(now - lastCfgSwitch > CFG_SWITCH_INTERVAL){
+                // currentBasicCfg = (currentBasicCfg + 1) % CFG_COUNT;
+// 
+                // Serial.print("[MASTER] switching cfg to index ");
+                // Serial.println(currentBasicCfg);
+// 
+                // applyConfig(configs[currentBasicCfg]);
+// 
+                // lastCfgSwitch = now;
             } else {
  
                 Serial.print("[MASTER] sending SYN on cfg ");
                 Serial.println(currentBasicCfg);
-
+                LoRa.idle(); 
                 LoRa.beginPacket();
                 LoRa.write(destination);
                 LoRa.write(localAddress);
@@ -222,7 +235,7 @@ void establishConnection(){
                     // Prepare SYN-ACK
                     
                     Serial.println("[SLAVE] sending SYN-ACK");
-
+                    LoRa.idle(); 
                     LoRa.beginPacket();
                     LoRa.write(destination);
                     LoRa.write(localAddress);
@@ -252,7 +265,7 @@ void establishConnection(){
 
                 receivedConnectionFrame = false;
 
-            } else if (now - lastCfgSwitch > 2500){
+            } else if (now - lastCfgSwitch > 10000){
                 currentBasicCfg = (currentBasicCfg + 1) % CFG_COUNT;
 
                 Serial.print("[Slave] switching cfg to index ");
@@ -279,15 +292,18 @@ helper funcitons
 ------------------------------*/
 
 void applyConfig(const LoRaConfig_t conf) {
+  LoRa.idle();
   LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
   LoRa.setSpreadingFactor(conf.spreadingFactor);
   LoRa.setCodingRate4(conf.codingRate);
   LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
   LoRa.setSyncWord(0x12);
-  LoRa.setPreambleLength(12);
+  LoRa.setPreambleLength(50);
   Serial.print("Applied Config -> SF:"); Serial.print(conf.spreadingFactor);
-  Serial.print(" BW_IDX:"); Serial.println(conf.bandwidth_index);
+  Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
+  Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate);
   Serial.println('\n\n');
+  LoRa.receive();
 }
 
 /*------------------------------
@@ -336,6 +352,7 @@ inline void getSignalBack(){
           attemptedRecovery++;
           lastRecoveryAttempted = millis();
         } else{
+          Serial.println("Entering establishing connection");
           establishConnection();
         }
       }

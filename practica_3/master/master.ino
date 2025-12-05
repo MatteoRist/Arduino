@@ -1,9 +1,13 @@
 #include <SPI.h>
 #include <LoRa.h>
+#include <Arduino_PMIC.h>
+
 #include "networking.h"
 
 
-#define SERIAL_DBG 0
+#define SERIAL_DBG 1
+
+#define TEST_ID_MAIN 0
 
 // Default
 bool hasPendingConfigChange = false;
@@ -46,7 +50,11 @@ void setup() {
     Serial.println("LoRa init failed!");
     while (true);
   }
-
+  if(init_PMIC()){
+    Serial.println("Battery works");
+  }else{
+    Serial.println("Not working battery");
+  }
     // ---- IDs ----
   localAddress = 0xA1;   // Master
   destination  = 0xB1;   // Slave
@@ -74,6 +82,7 @@ void loop() {
     if(gotPing){
       pongs_received++;
       mode = SAFE;
+      gotPing = false;
     }
     if(mode == SEND_CONFIG_WITHOUT_ACK ){
       if(gotACK){
@@ -127,6 +136,7 @@ void loop() {
 
 
 void onReceive(int packetSize) {
+  // Serial.println("Wiadomosc master\n\n\n\n\n\n\n");
   if (packetSize == 0) return;
 
   int recipient = LoRa.read();
@@ -134,12 +144,17 @@ void onReceive(int packetSize) {
   uint8_t msgId = LoRa.read();
 
 
-  if (recipient != localAddress) return;
+  if (recipient != localAddress) {
+    Serial.print("Wrong recipient: 0x");
+    Serial.print(recipient, HEX);
+    Serial.print("  my address: 0x");
+    Serial.println(localAddress, HEX);
+    return;}
 
-#if SERIAL_DBG
-  Serial.print("SNR  ==");Serial.print(LoRa.packetSnr());
-  Serial.print("  RSSI =="); Serial.println(LoRa.rssi());
-#endif
+// #if SERIAL_DBG
+  // Serial.print("SNR  ==");Serial.print(LoRa.packetSnr());
+  // Serial.print("  RSSI =="); Serial.println(LoRa.packetRssi());
+// #endif
 
   // read payload
   uint8_t buffer[10];
@@ -158,14 +173,14 @@ void onReceive(int packetSize) {
     if (rcvd >= 2) {
       
       gotPing = true;
-      if(LoRa.rssi() < lowestTestedRSSIPing) lowestTestedRSSIPing = LoRa.rssi();
+      if(LoRa.packetRssi() < lowestTestedRSSIPing) lowestTestedRSSIPing = LoRa.packetRssi();
       if(LoRa.packetSnr() < lowestTestedSNRPing) lowestTestedSNRPing = LoRa.packetSnr();
 
-#if SERIAL_DBG
-      Serial.print("<- PONG from "); Serial.print(sender, HEX);
-      Serial.print(" test_id:"); Serial.print(data[0]);
-      Serial.print("  count_received: "); Serial.print(data[1]);
-#endif
+// #if SERIAL_DBG
+      // Serial.print("<- PONG from "); Serial.print(sender, HEX);
+      // Serial.print(" test_id:"); Serial.print(buffer[0]);
+      // Serial.print("  count_received: "); Serial.print(buffer[1]);
+// #endif
 
     }
   } else if (msgId == MSG_ACK) {
@@ -175,8 +190,7 @@ void onReceive(int packetSize) {
 }
 
 void sendPing(uint8_t pingId, uint8_t pongReceived) {
-  // payload: [testId, pingId]
-
+  LoRa.idle(); 
   LoRa.beginPacket();
   LoRa.write(destination);
   LoRa.write(localAddress);
@@ -187,10 +201,10 @@ void sendPing(uint8_t pingId, uint8_t pongReceived) {
 
   txInProgress = true;
   txStartTime = millis();
-#if SERIAL_DBG
-  Serial.print("-> Sent PING id: "); Serial.print(pingId);
+// #if SERIAL_DBG
+  // Serial.print("-> Sent PING id: "); Serial.print(pingId);
   Serial.print("   Pong received "); Serial.print(pongReceived);
-#endif
+// #endif
 }
 
 
@@ -244,6 +258,7 @@ inline void analyzeTest(){
         hasPendingConfigChange = true;
         lastChangeTime = nowt;
         // send config (will be sent in next loop as part of state machine)
+        LoRa.idle(); 
         LoRa.beginPacket();
         LoRa.write(destination);
         LoRa.write(localAddress);

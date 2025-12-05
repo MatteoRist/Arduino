@@ -1,7 +1,11 @@
 #include <SPI.h>
 #include <LoRa.h>
+#include <Arduino_PMIC.h>
+
 #include "networking.h"
 
+
+#define SERIAL_DBG 1
 
 volatile uint8_t lastPingId = 255;
 volatile uint8_t lastPingPongReceived = 255;
@@ -28,6 +32,11 @@ void setup() {
     Serial.println("LoRa init failed!");
     while (true);
   }
+  if(init_PMIC()){
+    Serial.println("Battery works");
+  }else{
+    Serial.println("Not working battery");
+  }
 
   // ---- IDs ----
   localAddress = 0xB1;   // Slave
@@ -39,6 +48,7 @@ void setup() {
   Serial.println("Slave ready. Listening...");
 
   establishConnection();
+  lastMsgGotTS = millis();
 }
 
 void loop() {
@@ -51,6 +61,7 @@ void loop() {
   }
   else if(mode == POSSIBLE_RECUPERATION){
     if(millis() - possibleRecuparationStart > PING_INTERVAL_MS / 4){
+      Serial.println("RECUPERATION_MODE entering");
       mode = RECUPERATION_MODE;
       attemptedRecovery = 0;
     }
@@ -69,6 +80,7 @@ void loop() {
       mode = POSSIBLE_RECUPERATION;
       possibleRecuparationStart = millis();
     }
+    // Serial.print("nexttxTime   "); Serial.println(nextTxTime);
     if(millis() >= nextTxTime){
 
       // Sending pong to master
@@ -81,14 +93,18 @@ void loop() {
       }
       // Sending acknowledge to master 
       else if(shouldSendACK){
+        LoRa.idle(); 
         LoRa.beginPacket();
         LoRa.write(destination);
         LoRa.write(localAddress);
         LoRa.write(MSG_ACK);
         LoRa.write(0);
-        LoRa.endPacket(true);
+
         txInProgress = true;
         txStartTime = millis();
+
+        LoRa.endPacket(true);
+        
 
         shouldSendACK = false;
         shouldSendACKAndChangeConfig = true;
@@ -102,22 +118,27 @@ void loop() {
 // ---- callbacks ----
 
 void onReceive(int packetSize) {
-#if SERIAL_DBG
-  Serial.println("Got msg");
-#endif
+// #if SERIAL_DBG
+  // Serial.println("Got msg");
+// #endif
   if (packetSize == 0) return;
 
   int recipient = LoRa .read();
   int sender    = LoRa.read();
   uint8_t msgId = LoRa.read();
-  uint8_t incomingLength = LoRa.read();
+  Serial.print("MSG id  "); Serial.println(msgId);
 
-#if SERIAL_DBG
-  Serial.print("SNR  ==");Serial.print(LoRa.packetSnr());
-  Serial.print("  RSSI =="); Serial.println(LoRa.rssi());
-#endif
+// #if SERIAL_DBG
+  // Serial.print("SNR  ==");Serial.print(LoRa.packetSnr());
+  // Serial.print("  RSSI =="); Serial.println(LoRa.packetRssi());
+// #endif
 
-  if (recipient != localAddress) return;
+  if (recipient != localAddress) {
+    Serial.print("Wrong recipient: 0x");
+    Serial.print(recipient, HEX);
+    Serial.print("  my address: 0x");
+    Serial.println(localAddress, HEX);
+    return;}
 
   // read payload
   uint8_t buffer[10];
@@ -128,12 +149,14 @@ void onReceive(int packetSize) {
 
 
   if(msgId == MSG_ESTABLISH_CONN){
+    // Serial.print("Connection establishing  "); Serial.print(buffer[0]);
     ConnectionFrame.flags = buffer[0];
     // RSSI is in [0,-127] so multiply *-1 will give uint8_t
-    ConnectionFrame.rssi = -LoRa.rssi();
+    ConnectionFrame.rssi = -LoRa.packetRssi();
     // SNR is in [0, -148] so adding will give uint8_T
     ConnectionFrame.snr = LoRa.packetSnr()+148;
     receivedConnectionFrame = true;
+    Serial.println("cosssss");
   }else if(msgId == MSG_PING){
     lastPingId = buffer[0];
     lastPingPongReceived = buffer[1];
@@ -150,17 +173,20 @@ void sendPong(uint8_t testId, uint8_t receivedSoFar) {
   uint8_t payload[2];
   payload[0] = testId;
   payload[1] = receivedSoFar;
-
+  LoRa.idle(); 
   LoRa.beginPacket();
   LoRa.write(destination);
   LoRa.write(localAddress);
   LoRa.write(MSG_PONG);
   LoRa.write(2);
   LoRa.write(payload, 2);
-  LoRa.endPacket(true);
 
   txInProgress = true;
   txStartTime = millis();
+  
+  LoRa.endPacket(true);
+
+  
   Serial.print("-> Sent PONG. count: "); Serial.println(receivedSoFar);
 }
 
