@@ -76,36 +76,61 @@ void loop()
   static uint32_t tx_begin_ms = 0;
   static uint8_t flags = 0;
 
+  uint8_t masterFlags = 0;
+  if(loraConfigPackeSize){
+    uint8_t readPointer = loraConfigPacketRead;
+    masterFlags = loraConfigPacketFIFO[readPointer].flags;
+    if(loraConfigPacketFIFO[readPointer].incomingLength == 4){
+      remoteNodeConf.bandwidth_index = loraConfigPacketFIFO[readPointer].data[0] >> 4;
+      remoteNodeConf.spreadingFactor = 6 + ((loraConfigPacketFIFO[readPointer].data[0] & 0x0F) >> 1);
+      remoteNodeConf.codingRate = 5 + (loraConfigPacketFIFO[readPointer].data[1] >> 6);
+      remoteNodeConf.txPower = 2 + ((loraConfigPacketFIFO[readPointer].data[1] & 0x3F) >> 1);
+      remoteRSSI = -int(loraConfigPacketFIFO[readPointer].data[2]) / 2.0f;
+      remoteSNR  =  int(loraConfigPacketFIFO[readPointer].data[3]) - 148;
+    }
+    #ifdef RECEIVE_DEBUG_PRINT_ON
+      RECEIVE_DEBUG_PRINT("Flags received ");
+      printFlags(masterFlags);    
+      LoRaPacketContentPrint(readPointer);
+    #endif
+    loraConfigPacketRead = (loraConfigPacketRead+1) % LORA_CONFIG_PACKET_BUFFER_SIZE;
+    loraConfigPackeSize--;
+  }
+
+
   if(mode == PROBING){
         probingModeLogic(flags, msgCount);
   }
 
 
   if(mode == STABLE && (millis() - lastReceivedTime_ms) > txInterval_ms * 2){
-    Serial.println("Starting instable mode");
-    mode = INSTABLE;
-    flags = flags | INSTABLE_FLAG;
-    instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
-    instableStarted = millis();
-    nextConfig = thisNodeConf;
-    tried_conf[0] = false;
-    tried_conf[1] = false;
-    tried_conf[2] = false;
-    tried_conf[3] = false;
-    if(thisNodeConf.codingRate < 8){
-      nextConfig.codingRate ++;
-      tried_conf[2] = true;
-    }else if(thisNodeConf.spreadingFactor < 12){
-      nextConfig.spreadingFactor++;
-      tried_conf[1] = true;
-    }else if(thisNodeConf.bandwidth_index > 0){
-      nextConfig.bandwidth_index--;
-      tried_conf[0] = true;
-    }else if(thisNodeConf.txPower < 20){
-      nextConfig.txPower++;
-      tried_conf[3] = true;
-    }
-    printFlags(flags);
+    init_LoRa(onReceive);
+    LoRa.receive();
+    lastReceivedTime_ms = millis();
+    // Serial.println("Starting instable mode");
+    // mode = INSTABLE;
+    // flags = flags | INSTABLE_FLAG;
+    // instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
+    // instableStarted = millis();
+    // nextConfig = thisNodeConf;
+    // tried_conf[0] = false;
+    // tried_conf[1] = false;
+    // tried_conf[2] = false;
+    // tried_conf[3] = false;
+    // if(thisNodeConf.codingRate < 8){
+      // nextConfig.codingRate ++;
+      // tried_conf[2] = true;
+    // }else if(thisNodeConf.spreadingFactor < 12){
+      // nextConfig.spreadingFactor++;
+      // tried_conf[1] = true;
+    // }else if(thisNodeConf.bandwidth_index > 0){
+      // nextConfig.bandwidth_index--;
+      // tried_conf[0] = true;
+    // }else if(thisNodeConf.txPower < 20){
+      // nextConfig.txPower++;
+      // tried_conf[3] = true;
+    // }
+    // printFlags(flags);
 
   }
   // Flags logic
@@ -180,6 +205,14 @@ void loop()
   /*-----------------------------------------------------------
   TX ended logic
   -----------------------------------------------------------*/
+
+  // hardware bug fix
+  if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir){
+      Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
+      init_LoRa(onReceive);
+      txDoneFlag = true;
+  }
+
   if (transmitting && txDoneFlag) {
 
     onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive);

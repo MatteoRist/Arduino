@@ -72,8 +72,6 @@ volatile uint32_t lastReceivedTime_ms = 0;
 LoRaConfig_t previousConfig = thisNodeConf;
 LoRaConfig_t nextConfig = thisNodeConf;
 
-volatile uint8_t masterFlags = 0; 
-
 // TX variables 
 uint8_t PREAMBLE_LEN = 8;
 uint32_t theoreticalTimeOnAir = 0;
@@ -241,7 +239,6 @@ void updateTimingParameters(const LoRaConfig_t& conf) {
     // 1. czas trwania symbolu (Ts) w ms
     double bw_hz = bandwidth_kHz[conf.bandwidth_index];
     symbol_duration_ms = (pow(2, conf.spreadingFactor) / bw_hz) * 1000.0;
-    Serial.println("updateTimingPara");
 
     // 2. Low Data Rate Optimization
     ldro_enabled = (symbol_duration_ms > 16.0);
@@ -298,7 +295,7 @@ void init_LoRa(LoRaReceiveCallback onReceive){
 }
 
 
-bool radioReset(LoRaReceiveCallback onReceive)
+bool resetRadio(LoRaReceiveCallback onReceive)
 {
     LoRa.reset(868E6);
     LoRa.setSyncWord(0x12);  
@@ -310,113 +307,132 @@ bool radioReset(LoRaReceiveCallback onReceive)
     LoRa.idle();
 }
 
+/*-------------------------------
+Receiving logic
+-------------------------------*/
 
+#define RECEIVE_DEBUG_PRINT_ON
+#ifdef RECEIVE_DEBUG_PRINT_ON
+    // Tryb debugowania: MAKRA są faktycznymi wywołaniami Serial
+    #define RECEIVE_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)
+    #define RECEIVE_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#else
+    // Tryb produkcyjny: MAKRA są PUSTE i zostaną usunięte przez kompilator
+    #define RECEIVE_DEBUG_PRINT(...) 
+    #define RECEIVE_DEBUG_PRINTLN(...) 
+#endif
+
+typedef struct{
+  uint8_t     recipent;
+  uint8_t     sender;
+  uint16_t    incomingMsgId;
+  uint8_t     flags;
+  uint8_t     incomingLength;
+  uint8_t     data[6];
+} LoRaConfigPacket_t;
+#define LORA_CONFIG_PACKET_BUFFER_SIZE 4
+volatile LoRaConfigPacket_t  loraConfigPacketFIFO[LORA_CONFIG_PACKET_BUFFER_SIZE];
+volatile uint8_t             loraConfigPackeSize = 0;
+volatile uint8_t             loraConfigPacketRead = 0;
 
 void inline onReceiveCommon(int packetSize){
-  if (transmitting){ Serial.println("\n----------->[BUG] radio should be idle");
-    // return;
-    }
-  
+
+  if (transmitting){ 
+    RECEIVE_DEBUG_PRINTLN("\n----------->[BUG] radio should be idle");
+  }
+
   if (packetSize == 0) {
-    Serial.println("Zero packet");
-    return;}          // Si no hay mensajes, retornamos
-  Serial.println("Normal packet");
+    RECEIVE_DEBUG_PRINTLN("Zero packet");
+    return;
+  }
 
-  // Leemos los primeros bytes del mensaje
-  uint8_t buffer[10];                   // Buffer para almacenar el mensaje
-  int recipient = LoRa.read();          // Dirección del destinatario
-  uint8_t sender = LoRa.read();         // Dirección del remitente
-  uint16_t incomingMsgId = ((uint16_t)LoRa.read() << 7) | (uint16_t)LoRa.read(); // Message ID
-  masterFlags = LoRa.read();           // Reading flags
-
-  // Printing flags
-  Serial.print("Flags received ");
-  printFlags(masterFlags);
-
+  int recipient = LoRa.read();
+  if ((recipient & localAddress) != localAddress ) {
+    RECEIVE_DEBUG_PRINTLN("Receiving error: This message is not for me.");
+    RECEIVE_DEBUG_PRINTLN(recipient, HEX);
+    return;
+  } 
+  uint8_t sender = LoRa.read();
   if(sender == localAddress){
-    Serial.println("\n----------->[BUG] Got my own message possible bounce back or hardware problem");
+    RECEIVE_DEBUG_PRINTLN("\n----------->[BUG] Got my own message possible bounce back or hardware problem");
     return;
   }
-  
+  uint16_t incomingMsgId = ((uint16_t)LoRa.read() << 8) | (uint16_t)LoRa.read();
+
   if(incomingMsgId == lastMsgId && lastMsgId != 0){
-    Serial.println("\n----------->[BUG] Got twice the same msg");
+    RECEIVE_DEBUG_PRINTLN("\n----------->[BUG] Got twice the same msg");
     return;
-  } else if(lastMsgId-incomingMsgId > 1 && lastMsgId-incomingMsgId < 100){
-    Serial.print("\nLost message lastMsgId"); Serial.print(lastMsgId); Serial.print(" incoming id "); Serial.println(incomingMsgId);
-    loosingData = true;
   }
+  // If everything alright writing data to buffer if it's empty
+  
+  if(loraConfigPackeSize < LORA_CONFIG_PACKET_BUFFER_SIZE){
+    uint8_t next = (loraConfigPacketRead+loraConfigPackeSize) % LORA_CONFIG_PACKET_BUFFER_SIZE;
+    loraConfigPackeSize++;
+    RECEIVE_DEBUG_PRINTLN("Got Package");
+    loraConfigPacketFIFO[next].recipent = recipient;
+    loraConfigPacketFIFO[next].sender = sender;
+    loraConfigPacketFIFO[next].incomingMsgId = incomingMsgId;
+    loraConfigPacketFIFO[next].flags = LoRa.read();
+    loraConfigPacketFIFO[next].incomingLength = LoRa.read();
+    uint8_t receivedBytes = 0; 
+    while (LoRa.available() && (receivedBytes < uint8_t(sizeof(LORA_CONFIG_PACKET_BUFFER_SIZE)-1))) {            
+      loraConfigPacketFIFO[next].data[receivedBytes++] = LoRa.read();
+    }
+    last_packet_RSSI = LoRa.packetRssi();
+    last_packet_SNR = LoRa.packetSnr();
+
+    // if (loraConfigPacketFIFO[next].incomingLength  != receivedBytes) {// Verificamos la longitud del mensaje
+      // RECEIVE_DEBUG_PRINT("Receiving error: declared message length " + String(loraConfigPacketFIFO[next].incomingLength));
+      // RECEIVE_DEBUG_PRINTLN(" does not match length " + String(receivedBytes));
+      // return;                             
+    // }
+  }else{
+    RECEIVE_DEBUG_PRINTLN("[ERROR] Not enough space in buffer");
+  }
+
+  // Should be changed but do not know for what
+  if(lastMsgId-incomingMsgId > 1 && lastMsgId-incomingMsgId < 100){
+    RECEIVE_DEBUG_PRINT("\nLost message lastMsgId"); RECEIVE_DEBUG_PRINT(lastMsgId); RECEIVE_DEBUG_PRINT(" incoming id "); RECEIVE_DEBUG_PRINTLN(incomingMsgId);
+    loosingData = true;
+  } 
   gotDataProbing++;
   lastMsgId = incomingMsgId;
   lastReceivedTime_ms = millis();
-  last_packet_RSSI = LoRa.packetRssi();
-  last_packet_SNR = LoRa.packetSnr();
 
+  return;
 
+}
 
-
-  uint8_t incomingLength = LoRa.read(); // Longitud en bytes del mensaje
-  
-  uint8_t receivedBytes = 0;            // Leemos el mensaje byte a byte
-  while (LoRa.available() && (receivedBytes < uint8_t(sizeof(buffer)-1))) {            
-    buffer[receivedBytes++] = (char)LoRa.read();
+void inline LoRaPacketContentPrint(uint8_t &readPointer){
+  RECEIVE_DEBUG_PRINTLN("Received from: 0x" + String(loraConfigPacketFIFO[readPointer].sender, HEX));
+  RECEIVE_DEBUG_PRINTLN("Sent to: 0x" + String(loraConfigPacketFIFO[readPointer].recipent, HEX));
+  RECEIVE_DEBUG_PRINTLN("Message ID: " + String(loraConfigPacketFIFO[readPointer].incomingMsgId));
+  RECEIVE_DEBUG_PRINTLN("Payload length: " + String(loraConfigPacketFIFO[readPointer].incomingLength));
+  RECEIVE_DEBUG_PRINT("Payload: ");
+  uint8_t buffer[6];
+  for(int i =0 ;i <6; i++){
+    buffer[i] = loraConfigPacketFIFO[readPointer].data[i];
   }
-  
-  if (incomingLength != receivedBytes) {// Verificamos la longitud del mensaje
-    Serial.print("Receiving error: declared message length " + String(incomingLength));
-    Serial.println(" does not match length " + String(receivedBytes));
-    return;                             
-  }
-
-  // Verificamos si se trata de un mensaje en broadcast o es un mensaje
-  // dirigido específicamente a este dispositivo.
-  // Nótese que este mecanismo es complementario al uso de la misma
-  // SyncWord y solo tiene sentido si hay más de dos receptores activos
-  // compartiendo la misma palabra de sincronización
-  if ((recipient & localAddress) != localAddress ) {
-    Serial.println("Receiving error: This message is not for me.");
-    return;
-  }
-
-  
-
-  // Imprimimos los detalles del mensaje recibido
-  Serial.println("Received from: 0x" + String(sender, HEX));
-  Serial.println("Sent to: 0x" + String(recipient, HEX));
-  Serial.println("Message ID: " + String(incomingMsgId));
-  Serial.println("Payload length: " + String(incomingLength));
-  Serial.print("Payload: ");
-  printBinaryPayload(buffer, receivedBytes);
-  Serial.print("RSSI: " + String(LoRa.packetRssi()));
-  Serial.print(" dBm\nSNR: " + String(LoRa.packetSnr()));
-  Serial.println(" dB");
+  printBinaryPayload(buffer, loraConfigPacketFIFO[readPointer].incomingLength);
+  RECEIVE_DEBUG_PRINT("RSSI: " + String(last_packet_RSSI));
+  RECEIVE_DEBUG_PRINT(" dBm\nSNR: " + String(last_packet_SNR));
+  RECEIVE_DEBUG_PRINTLN(" dB");
 
   // Actualizamos remoteNodeConf y lo mostramos
-  if (receivedBytes == 4) {
-    remoteNodeConf.bandwidth_index = buffer[0] >> 4;
-    remoteNodeConf.spreadingFactor = 6 + ((buffer[0] & 0x0F) >> 1);
-    remoteNodeConf.codingRate = 5 + (buffer[1] >> 6);
-    remoteNodeConf.txPower = 2 + ((buffer[1] & 0x3F) >> 1);
-    remoteRSSI = -int(buffer[2]) / 2.0f;
-    remoteSNR  =  int(buffer[3]) - 148;
-  
-    Serial.print("Remote config: BW: ");
-    Serial.print(bandwidth_kHz[remoteNodeConf.bandwidth_index]);
-    Serial.print(" kHz, SPF: ");
-    Serial.print(remoteNodeConf.spreadingFactor);
-    Serial.print(", CR: ");
-    Serial.print(remoteNodeConf.codingRate);
-    Serial.print(", TxPwr: ");
-    Serial.print(remoteNodeConf.txPower);
-    Serial.print(" dBm, RSSI: ");
-    Serial.print(remoteRSSI);
-    Serial.print(" dBm, SNR: ");
-    Serial.print(remoteSNR,1);
-    Serial.println(" dB\n");
-  }
-  else {
-    Serial.print("Unexpected payload size: ");
-    Serial.print(receivedBytes);
-    Serial.println(" bytes\n");
+  if (loraConfigPacketFIFO[readPointer].incomingLength == 4) {
+    RECEIVE_DEBUG_PRINT("Remote config: BW: ");
+    RECEIVE_DEBUG_PRINT(bandwidth_kHz[remoteNodeConf.bandwidth_index]);
+    RECEIVE_DEBUG_PRINT(" kHz, SPF: ");
+    RECEIVE_DEBUG_PRINT(remoteNodeConf.spreadingFactor);
+    RECEIVE_DEBUG_PRINT(", CR: ");
+    RECEIVE_DEBUG_PRINT(remoteNodeConf.codingRate);
+    RECEIVE_DEBUG_PRINT(", TxPwr: ");
+    RECEIVE_DEBUG_PRINT(remoteNodeConf.txPower);
+    RECEIVE_DEBUG_PRINT(" dBm, RSSI: ");
+    RECEIVE_DEBUG_PRINT(remoteRSSI);
+    RECEIVE_DEBUG_PRINT(" dBm, SNR: ");
+    RECEIVE_DEBUG_PRINT(remoteSNR,1);
+    RECEIVE_DEBUG_PRINTLN(" dB\n");
   }
 }
 
@@ -470,17 +486,11 @@ void inline startProbing(uint32_t &txInterval_ms, uint16_t &msgCount, uint8_t &f
   -----------------------------------------------------------*/
 
 void inline onTXCommon(uint32_t &tx_begin_ms, uint32_t &lastSendTime_ms, uint32_t &txInterval_ms, LoRaReceiveCallback onReceive){
-    uint32_t TxTime_ms = millis() - tx_begin_ms;
-
-    if( TxTime_ms > theoreticalTimeOnAir*2){
-      Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(TxTime_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir*2);
-      TxTime_ms = theoreticalTimeOnAir;
-      radioReset(onReceive);
-    }
+    uint32_t TxTime_ms = min(millis() - tx_begin_ms, theoreticalTimeOnAir);
 
     if (digitalRead(LORA_DEFAULT_DIO0_PIN) == HIGH){
       Serial.println("\n----------->[BUG] LORA DIO0 PIN should be low");
-      radioReset(onReceive);
+      resetRadio(onReceive);
     }
     
     Serial.print("----> TX completed in ");

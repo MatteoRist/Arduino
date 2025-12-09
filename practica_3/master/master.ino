@@ -25,6 +25,8 @@
 
 
 
+void inline optimizeConfig(uint8_t &flags);
+
 // --------------------------------------------------------------------
 // Setup function
 // --------------------------------------------------------------------
@@ -65,9 +67,30 @@ void loop()
   static uint32_t txInterval_ms = TX_LAPSE_MS;
   static uint32_t tx_begin_ms = 0;
   static uint8_t flags = 0;
-  static bool lowerTXPower = false;
-  static bool lowerBW = false;
   
+  uint8_t masterFlags = 0;
+  if(loraConfigPackeSize){
+    masterFlags = loraConfigPacketFIFO[loraConfigPacketRead].flags;
+    #ifdef RECEIVE_DEBUG_PRINT_ON
+      uint8_t readPointer = loraConfigPacketRead;
+      RECEIVE_DEBUG_PRINT("Flags received ");
+      printFlags(masterFlags);
+      if(loraConfigPacketFIFO[readPointer].incomingLength == 4){
+        remoteNodeConf.bandwidth_index = loraConfigPacketFIFO[readPointer].data[0] >> 4;
+        remoteNodeConf.spreadingFactor = 6 + ((loraConfigPacketFIFO[readPointer].data[0] & 0x0F) >> 1);
+        remoteNodeConf.codingRate = 5 + (loraConfigPacketFIFO[readPointer].data[1] >> 6);
+        remoteNodeConf.txPower = 2 + ((loraConfigPacketFIFO[readPointer].data[1] & 0x3F) >> 1);
+        remoteRSSI = -int(loraConfigPacketFIFO[readPointer].data[2]) / 2.0f;
+        remoteSNR  =  int(loraConfigPacketFIFO[readPointer].data[3]) - 148;
+      }
+
+      LoRaPacketContentPrint(readPointer);
+    #endif
+    loraConfigPacketRead = (loraConfigPacketRead+1) % LORA_CONFIG_PACKET_BUFFER_SIZE;
+    loraConfigPackeSize--;
+    optimizeConfig(flags);
+  }
+
   if(mode == PROBING){
     probingModeLogic(flags, msgCount);
   }
@@ -83,12 +106,10 @@ void loop()
   }
 
   if(masterFlags){
-    uint8_t copyMasterFlag = masterFlags;
-    masterFlags = 0;
-    if(copyMasterFlag & INSTABLE_FLAG_ACK){
+    if(masterFlags & INSTABLE_FLAG_ACK){
       flags = flags | INSTABLE_FLAG_ACK;
     }
-    if(copyMasterFlag & INSTABLE_FLAG){
+    if(masterFlags & INSTABLE_FLAG){
       mode = STABLE;
       flags = 0;
       msgCount = 0;
@@ -96,89 +117,33 @@ void loop()
     }
   }
 
-  if(mode == STABLE && (millis() - lastReceivedTime_ms) > txInterval_ms * 3){
-    mode = INSTABLE;
-    Serial.println("Starting instable modePacket");
-    mode = INSTABLE;
-    instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
-    instableStarted = millis();
-    nextConfig = thisNodeConf;
-    flags = flags | INSTABLE_FLAG;
-    if(flags & INSTABLE_FLAG_ACK ){
-      mode = STABLE;
-      flags = 0;
-      msgCount = 0;
-      revertConfig(msgCount, flags);
-    }
+  // Restarting radio just in case
+  if(!transmitting && mode == STABLE && (millis() - lastReceivedTime_ms) > txInterval_ms * 3){
+    resetRadio(onReceive);
+    LoRa.receive();
+    lastReceivedTime_ms = millis();
+    // mode = INSTABLE;
+    // Serial.println("Starting instable modePacket");
+    // mode = INSTABLE;
+    // instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
+    // instableStarted = millis();
+    // nextConfig = thisNodeConf;
+    // flags = flags | INSTABLE_FLAG;
+    // if(flags & INSTABLE_FLAG_ACK ){
+      // mode = STABLE;
+      // flags = 0;
+      // msgCount = 0;
+      // revertConfig(msgCount, flags);
+    // }
 
   }
 
   if (!transmitting && ((millis() - lastSendTime_ms) > txInterval_ms)) {
-    if(mode == STABLE && txIntervals ==TX_INTERVAL_BEFORE_PROBING){
-      nextConfig = thisNodeConf;
-      if(lowerTXPower){
-        
-        flags = CONFIG_CHANGE_FLAG; nextConfig.txPower--;
-        lowerTXPower = false;
-      } else if(lowerBW){
-        flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
-      }
-      else if(!tried_conf[1]){
-        if(thisNodeConf.spreadingFactor == 7){ tried_conf[1] = true;}
-        else{flags = CONFIG_CHANGE_FLAG; nextConfig.spreadingFactor--;}
-      }
-      else if(!tried_conf[0]){
-        if(thisNodeConf.bandwidth_index == 9){ tried_conf[0] = true;}
-        else{flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;}
-      }
-      else if (!tried_conf[2]){
-        if(thisNodeConf.codingRate == 5){ tried_conf[2] = true;}
-        else{flags = CONFIG_CHANGE_FLAG; nextConfig.codingRate--;}
-      }else{
-        txIntervals = 0;
-      }
-      printFlags(flags);
-    }
 
     Serial.print("Want to transmit msg");
     if(loosingData){
         flags = flags | LOOSING_DATA_FLAG;
-    }
-
-    if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
-        Serial.print("Lora RSSI below threshold"); Serial.print(last_packet_RSSI); Serial.print(" < "); Serial.println(RSSI_THRESHOLD);
-        nextConfig = thisNodeConf;
-        nextConfig.txPower++;
-        tried_conf[0] = false;
-        tried_conf[1] = false;
-        tried_conf[2] = false;
-        tried_conf[3] = true;
-        flags = flags | CONFIG_CHANGE_FLAG;
-        printFlags(flags);
-    } else if (mode == STABLE && last_packet_RSSI > RSSI_THRESHOLD_UPPER && thisNodeConf.txPower>2){
-        lowerTXPower = true;
     } 
-    else if (last_packet_SNR > SNR_THRESHOLD_UPPER){
-      if(thisNodeConf.bandwidth_index < 9){
-        lowerBW = true;
-      txIntervals = min(++txIntervals,TX_INTERVAL_BEFORE_PROBING);
-      } else{
-      if(thisNodeConf.txPower > 2){
-        lowerTXPower = true;
-      }
-      }
-    } else if (last_packet_SNR < SNR_THRESHOLD){
-      Serial.print("Lora SNR below threshold"); Serial.print(last_packet_SNR); Serial.print(" < "); Serial.println(SNR_THRESHOLD);
-        nextConfig = thisNodeConf;
-        nextConfig.bandwidth_index--;
-        tried_conf[0] = true;
-        tried_conf[1] = false;
-        tried_conf[2] = false;
-        tried_conf[3] = false;
-        flags = flags | CONFIG_CHANGE_FLAG;
-        printFlags(flags);
-    }
-      
 
     uint8_t payload[50];
     uint8_t payloadLength = 0;
@@ -189,9 +154,9 @@ void loop()
 
     // Incluimos el RSSI y el SNR del último paquete recibido
     // RSSI puede estar en un rango de [0, -127] dBm
-    payload[payloadLength++] = uint8_t(-LoRa.packetRssi() * 2);
+    payload[payloadLength++] = uint8_t(-last_packet_RSSI * 2);
     // SNR puede estar en un rango de [20, -148] dBm
-    payload[payloadLength++] = uint8_t(148 + LoRa.packetSnr());
+    payload[payloadLength++] = uint8_t(148 + last_packet_SNR);
     
 
     
@@ -221,13 +186,14 @@ void loop()
     }else{
       Serial.print("Blad wysylanie pakietu");
     }
-
-    if(mode == STABLE){
-      txIntervals++;
-    }
   }       
   
-  
+  if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir){
+      Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
+      init_LoRa(onReceive);
+      txDoneFlag = true;
+  }
+
   if (transmitting && txDoneFlag) {
 
     onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive);
@@ -260,6 +226,74 @@ void loop()
 void onReceive(int packetSize) 
 {
   onReceiveCommon(packetSize);
+}
+
+void inline optimizeConfig(uint8_t &flags){
+  bool lowerTXPower = false;
+  bool lowerBW = false;
+  if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
+        Serial.print("Lora RSSI below threshold"); Serial.print(last_packet_RSSI); Serial.print(" < "); Serial.println(RSSI_THRESHOLD);
+        nextConfig = thisNodeConf;
+        nextConfig.txPower++;
+        tried_conf[0] = false;
+        tried_conf[1] = false;
+        tried_conf[2] = false;
+        tried_conf[3] = true;
+        flags = flags | CONFIG_CHANGE_FLAG;
+        printFlags(flags);
+    } else if (mode == STABLE && last_packet_RSSI > RSSI_THRESHOLD_UPPER && thisNodeConf.txPower>2){
+        lowerTXPower = true;
+    } 
+    else if (last_packet_SNR > SNR_THRESHOLD_UPPER){
+      if(thisNodeConf.bandwidth_index < 9){
+        lowerBW = true;
+      txIntervals = min(++txIntervals,TX_INTERVAL_BEFORE_PROBING);
+      } else{
+      if(thisNodeConf.txPower > 2){
+        lowerTXPower = true;
+      }
+      }
+    } else if (last_packet_SNR < SNR_THRESHOLD){
+      Serial.print("Lora SNR below threshold"); Serial.print(last_packet_SNR); Serial.print(" < "); Serial.println(SNR_THRESHOLD);
+        nextConfig = thisNodeConf;
+        nextConfig.bandwidth_index--;
+        tried_conf[0] = true;
+        tried_conf[1] = false;
+        tried_conf[2] = false;
+        tried_conf[3] = false;
+        flags = flags | CONFIG_CHANGE_FLAG;
+        printFlags(flags);
+    }
+
+  if(mode == STABLE && txIntervals ==TX_INTERVAL_BEFORE_PROBING){
+      nextConfig = thisNodeConf;
+      if(lowerTXPower){
+        
+        flags = CONFIG_CHANGE_FLAG; nextConfig.txPower--;
+        lowerTXPower = false;
+      } else if(lowerBW){
+        flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
+      }
+      else if(!tried_conf[1]){
+        if(thisNodeConf.spreadingFactor == 7){ tried_conf[1] = true;}
+        else{flags = CONFIG_CHANGE_FLAG; nextConfig.spreadingFactor--;}
+      }
+      else if(!tried_conf[0]){
+        if(thisNodeConf.bandwidth_index == 9){ tried_conf[0] = true;}
+        else{flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;}
+      }
+      else if (!tried_conf[2]){
+        if(thisNodeConf.codingRate == 5){ tried_conf[2] = true;}
+        else{flags = CONFIG_CHANGE_FLAG; nextConfig.codingRate--;}
+      }else{
+        txIntervals = 0;
+      }
+      printFlags(flags);
+    }
+
+    if(mode == STABLE){
+      txIntervals++;
+    }
 }
 
 
