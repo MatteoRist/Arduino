@@ -22,11 +22,11 @@
 #include <Arduino_PMIC.h>
 #include "networking.h"
 
-
-
+#define DEFAULT_CONFIG_DETECTION_INTERVAL 100000
+uint32_t last_default_config_detection_ts = 0;
 
 void inline optimizeConfig(uint8_t &flags);
-
+void inline sendDetectionConfig();
 // --------------------------------------------------------------------
 // Setup function
 // --------------------------------------------------------------------
@@ -67,6 +67,8 @@ void loop()
   static uint32_t txInterval_ms = TX_LAPSE_MS;
   static uint32_t tx_begin_ms = 0;
   static uint8_t flags = 0;
+  static bool defaultConfigDetection = false;
+  static bool gotMsg;
   
   uint8_t masterFlags = 0;
   if(loraConfigPackeSize){
@@ -88,11 +90,11 @@ void loop()
     #endif
     loraConfigPacketRead = (loraConfigPacketRead+1) % LORA_CONFIG_PACKET_BUFFER_SIZE;
     loraConfigPackeSize--;
-    optimizeConfig(flags);
+    gotMsg = true;
   }
 
   if(mode == PROBING){
-    probingModeLogic(flags, msgCount);
+    probingModeLogic(flags, msgCount, masterFlags);
   }
 
   if(mode == INSTABLE ){
@@ -122,69 +124,70 @@ void loop()
     resetRadio(onReceive);
     LoRa.receive();
     lastReceivedTime_ms = millis();
-    // mode = INSTABLE;
-    // Serial.println("Starting instable modePacket");
-    // mode = INSTABLE;
-    // instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
-    // instableStarted = millis();
-    // nextConfig = thisNodeConf;
-    // flags = flags | INSTABLE_FLAG;
-    // if(flags & INSTABLE_FLAG_ACK ){
-      // mode = STABLE;
-      // flags = 0;
-      // msgCount = 0;
-      // revertConfig(msgCount, flags);
-    // }
-
   }
 
+  
+
   if (!transmitting && ((millis() - lastSendTime_ms) > txInterval_ms)) {
+    if(mode == STABLE && ((millis() - last_default_config_detection_ts) > DEFAULT_CONFIG_DETECTION_INTERVAL) && applyConfig(defaultConfig, true)){ 
+      sendDetectionConfig();
+      tx_begin_ms = millis();
+      transmitting = true;
+      txDoneFlag = false;
+      defaultConfigDetection = true;
 
-    Serial.print("Want to transmit msg");
-    if(loosingData){
-        flags = flags | LOOSING_DATA_FLAG;
-    } 
-
-    uint8_t payload[50];
-    uint8_t payloadLength = 0;
-    payload[payloadLength]    = (nextConfig.bandwidth_index << 4);
-    payload[payloadLength++] |= ((nextConfig.spreadingFactor - 6) << 1);
-    payload[payloadLength]    = ((nextConfig.codingRate - 5) << 6);
-    payload[payloadLength++] |= ((nextConfig.txPower - 2) << 1);
-
-    // Incluimos el RSSI y el SNR del último paquete recibido
-    // RSSI puede estar en un rango de [0, -127] dBm
-    payload[payloadLength++] = uint8_t(-last_packet_RSSI * 2);
-    // SNR puede estar en un rango de [20, -148] dBm
-    payload[payloadLength++] = uint8_t(148 + last_packet_SNR);
-    payloadLength = 4;
-
-    
-    if(sendMessage(payload, payloadLength, msgCount, flags)){
-    
-    transmitting = true;
-    txDoneFlag = false;
-    tx_begin_ms = millis(); 
-     
-    Serial.print("Sending packet ");
-    Serial.print(msgCount++);
-    Serial.print(" flags sent ");
-    printFlags(flags);
-    Serial.print(": ");
-    printBinaryPayload(payload, payloadLength);
-    
-    if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
-        flags = 0;
-        msgCount = 0;
-        changeToNewConfig(msgCount, flags);
-        mode = STABLE;
-        Serial.print("RSSI back");
-        
-        printFlags(flags);
-    }
-    flags &= ~CONFIG_CHANGE_FLAG;
     }else{
-      Serial.print("Blad wysylanie pakietu");
+      Serial.print("Want to transmit msg");
+
+      if(gotMsg){
+        optimizeConfig(flags);
+        gotMsg = false;
+      }
+      if(loosingData){
+          flags = flags | LOOSING_DATA_FLAG;
+      } 
+
+      uint8_t payload[50];
+      uint8_t payloadLength = 0;
+      payload[payloadLength]    = (nextConfig.bandwidth_index << 4);
+      payload[payloadLength++] |= ((nextConfig.spreadingFactor - 6) << 1);
+      payload[payloadLength]    = ((nextConfig.codingRate - 5) << 6);
+      payload[payloadLength++] |= ((nextConfig.txPower - 2) << 1);
+
+      // Incluimos el RSSI y el SNR del último paquete recibido
+      // RSSI puede estar en un rango de [0, -127] dBm
+      payload[payloadLength++] = uint8_t(-last_packet_RSSI * 2);
+      // SNR puede estar en un rango de [20, -148] dBm
+      payload[payloadLength++] = uint8_t(148 + last_packet_SNR);
+      payloadLength = 4;
+
+
+      if(sendMessage(payload, payloadLength, msgCount, flags)){
+      
+      transmitting = true;
+      txDoneFlag = false;
+      tx_begin_ms = millis(); 
+      
+      Serial.print("Sending packet ");
+      Serial.print(msgCount++);
+      Serial.print(" flags sent ");
+      printFlags(flags);
+      Serial.print(": ");
+      printBinaryPayload(payload, payloadLength);
+      
+      if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
+          flags = 0;
+          msgCount = 0;
+          changeToNewConfig(msgCount, flags);
+          mode = STABLE;
+          Serial.print("RSSI back");
+
+          printFlags(flags);
+      }
+      flags &= ~CONFIG_CHANGE_FLAG;
+      }else{
+        Serial.print("Blad wysylanie pakietu");
+      }
     }
   }       
   
@@ -192,28 +195,23 @@ void loop()
       Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
       init_LoRa(onReceive);
       txDoneFlag = true;
+      // flags = flags | CONFIG_NOT_ACCEPTED;
   }
 
   if (transmitting && txDoneFlag) {
-
-    onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive);
+    if(defaultConfigDetection){
+      Serial.print("After default transmission");
+      applyConfig(thisNodeConf, false);
+      defaultConfigDetection = false;
+    }
+    onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive, flags);
 
     // STARTING PROBING TO GET FASTER 
     if(mode == STABLE && txIntervals > TX_INTERVAL_BEFORE_PROBING){
       Serial.println("Starting Probing mode");
-      // Deciding what to do
-      
-      // if(txIntervals > TX_INTERVAL_BEFORE_PROBING){
-        mode = PROBING;
-        startProbing(txInterval_ms, msgCount, flags);
-      // }
+      startProbing(txInterval_ms, msgCount, flags);
     }
-    // if(mode == STABLE && loosingData){
-      // Serial.println("Starting instable mode");
-      // mode = INSTABLE;
-      // instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
-      // instableStarted = millis();
-    // }
+
     transmitting = false;
     LoRa.receive();
     
@@ -231,65 +229,88 @@ void onReceive(int packetSize)
 void inline optimizeConfig(uint8_t &flags){
   bool lowerTXPower = false;
   bool fasterBW = false;
-  bool lowerBW = false; 
-  if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
-        Serial.print("Lora RSSI below threshold"); Serial.print(last_packet_RSSI); Serial.print(" < "); Serial.println(RSSI_THRESHOLD);
-        nextConfig = thisNodeConf;
-        nextConfig.txPower++;
-        tried_conf[0] = false;
-        tried_conf[1] = false;
-        tried_conf[2] = false;
-        tried_conf[3] = true;
-        flags = flags | CONFIG_CHANGE_FLAG;
-        printFlags(flags);
-    } else if (mode == STABLE && last_packet_RSSI > RSSI_THRESHOLD_UPPER && thisNodeConf.txPower>2){
-        lowerTXPower = true;
+  bool lowSnr = false; 
+  if(mode == STABLE){
+    if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
+          Serial.print("Lora RSSI below threshold"); Serial.print(last_packet_RSSI); Serial.print(" < "); Serial.println(RSSI_THRESHOLD);
+          nextConfig = thisNodeConf;
+          nextConfig.txPower++;
+            applyConfig(nextConfig, true);
+            thisNodeConf = nextConfig;
+            last_packet_RSSI = RSSI_THRESHOLD + 1;
+        } else if (last_packet_SNR < SNR_THRESHOLD[thisNodeConf.spreadingFactor-7]){
+          Serial.print("Lora SNR below threshold"); Serial.print(last_packet_SNR); Serial.print(" < "); Serial.println(SNR_THRESHOLD[thisNodeConf.spreadingFactor-7]);
+          lowSnr = true;
+        } else if (mode == STABLE && last_packet_RSSI > RSSI_THRESHOLD_UPPER && thisNodeConf.txPower>2){
+            nextConfig = thisNodeConf;
+            nextConfig.txPower--;
+            applyConfig(nextConfig, true);
+            thisNodeConf = nextConfig;
+            last_packet_RSSI = RSSI_THRESHOLD_UPPER - 1;
+        } else if (last_packet_SNR > SNR_THRESHOLD_UPPER){
+          if(thisNodeConf.bandwidth_index < 9){
+            fasterBW = true;
+            txIntervals = min(++txIntervals,TX_INTERVAL_BEFORE_PROBING);
+          } else{
+          if(thisNodeConf.txPower > 2){
+            lowerTXPower = true;
+          }
+          }
     } 
-    else if (last_packet_SNR > SNR_THRESHOLD_UPPER){
-      if(thisNodeConf.bandwidth_index < 9){
-        fasterBW = true;
-        txIntervals = min(++txIntervals,TX_INTERVAL_BEFORE_PROBING);
-      } else{
-      if(thisNodeConf.txPower > 2){
-        lowerTXPower = true;
-      }
-      }
-    } else if (last_packet_SNR < SNR_THRESHOLD){
-      Serial.print("Lora SNR below threshold"); Serial.print(last_packet_SNR); Serial.print(" < "); Serial.println(SNR_THRESHOLD);
-      lowerBW = true;
-    }
+    if(txIntervals ==TX_INTERVAL_BEFORE_PROBING){
+          nextConfig = thisNodeConf;
 
-  if(mode == STABLE && txIntervals ==TX_INTERVAL_BEFORE_PROBING){
-      nextConfig = thisNodeConf;
+          if(lowSnr){
+            if(thisNodeConf.spreadingFactor < 12){
+              nextConfig.spreadingFactor ++;
+            }
+            flags = CONFIG_CHANGE_FLAG; 
+            if(thisNodeConf.bandwidth_index > 0){
+              nextConfig.bandwidth_index--;
+            }
+          }if(lowerTXPower){
+            flags = CONFIG_CHANGE_FLAG; nextConfig.txPower--;
 
-      if(lowerBW){
-        flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index--;
-      }if(lowerTXPower){
-        flags = CONFIG_CHANGE_FLAG; nextConfig.txPower--;
-        lowerTXPower = false;
-      } else if(fasterBW){
-        flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
-      }
-      else if(!tried_conf[1] && thisNodeConf.spreadingFactor != 7){
-        tried_conf[1] = true;
-        flags = CONFIG_CHANGE_FLAG; nextConfig.spreadingFactor--;
-      }
-      else if(!tried_conf[0] && thisNodeConf.bandwidth_index != 9){
-        tried_conf[0] = true;
-        flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
-      }
-      else if (!tried_conf[2] && thisNodeConf.codingRate != 5){
-        tried_conf[2] = true;
-        flags = CONFIG_CHANGE_FLAG; nextConfig.codingRate--;
-      }else{
-        txIntervals = 0;
-      }
-      printFlags(flags);
+          } else if(fasterBW){
+            flags = CONFIG_CHANGE_FLAG;
+            nextConfig.bandwidth_index++;
+            nextConfig.spreadingFactor = max(7, thisNodeConf.spreadingFactor-1);
+          }
+          else if(thisNodeConf.spreadingFactor != 7 && last_packet_SNR > SNR_THRESHOLD[thisNodeConf.spreadingFactor-8] + 2.5){
+            flags = CONFIG_CHANGE_FLAG; nextConfig.spreadingFactor--;
+          }
+          else if(thisNodeConf.bandwidth_index != 9 && last_packet_SNR > SNR_THRESHOLD[thisNodeConf.spreadingFactor-7] + 3){
+            flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
+          }
+          else if (thisNodeConf.codingRate != 5){
+            flags = CONFIG_CHANGE_FLAG; nextConfig.codingRate--;
+          }else{
+            txIntervals = 0;
+          }
+          printFlags(flags);
+          last_packet_RSSI = 10;
+          last_packet_SNR = 10;
     }
+    txIntervals++;
+    }
+}
 
-    if(mode == STABLE){
-      txIntervals++;
-    }
+void inline sendDetectionConfig(){
+  Serial.print("[LOG] default detection");
+  uint8_t payload[4];
+  payload[0]    = (thisNodeConf.bandwidth_index << 4);
+  payload[0] |= ((thisNodeConf.spreadingFactor - 6) << 1);
+  payload[1]    = ((thisNodeConf.codingRate - 5) << 6);
+  payload[1] |= ((thisNodeConf.txPower - 2) << 1);
+  if(sendMessage(payload, 4, 255, CONFIG_CHANGE_FLAG | CONFIG_NOT_ACCEPTED)){
+    Serial.print("Sending packet ");
+    Serial.print(255);
+    Serial.print(" flags sent ");
+    printFlags(CONFIG_CHANGE_FLAG | CONFIG_NOT_ACCEPTED);
+    Serial.print(": ");
+    printBinaryPayload(payload, 4);
+  }
+  last_default_config_detection_ts = millis();
 }
 
 

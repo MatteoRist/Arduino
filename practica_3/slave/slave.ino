@@ -22,8 +22,10 @@
 #include <Arduino_PMIC.h>
 #include "networking.h"
 
-
-
+uint32_t lastReceivedMasterTime_ms = 0;
+const uint8_t MASTER_IP = 0xB0;
+#define TIMEOUT_TO_DEFAULT 100000
+#define MINIMAL_TX_TO_DEFAULT 8
 
 // NOTA: Ajustar estas variables 
 
@@ -85,6 +87,10 @@ void loop()
       remoteNodeConf.spreadingFactor = 6 + ((loraConfigPacketFIFO[readPointer].data[0] & 0x0F) >> 1);
       remoteNodeConf.codingRate = 5 + (loraConfigPacketFIFO[readPointer].data[1] >> 6);
       remoteNodeConf.txPower = 2 + ((loraConfigPacketFIFO[readPointer].data[1] & 0x3F) >> 1);
+      if(remoteNodeConf.txPower != thisNodeConf.txPower){
+        thisNodeConf.txPower = remoteNodeConf.txPower;
+        LoRa.setTxPower(thisNodeConf.txPower, PA_OUTPUT_PA_BOOST_PIN);
+      }
       remoteRSSI = -int(loraConfigPacketFIFO[readPointer].data[2]) / 2.0f;
       remoteSNR  =  int(loraConfigPacketFIFO[readPointer].data[3]) - 148;
     // }
@@ -93,45 +99,29 @@ void loop()
       printFlags(masterFlags);    
       LoRaPacketContentPrint(readPointer);
     #endif
+    if(loraConfigPacketFIFO[readPointer].sender == MASTER_IP){
+      lastReceivedMasterTime_ms = millis();
+    }
     loraConfigPacketRead = (loraConfigPacketRead+1) % LORA_CONFIG_PACKET_BUFFER_SIZE;
     loraConfigPackeSize--;
   }
 
 
   if(mode == PROBING){
-        probingModeLogic(flags, msgCount);
+        probingModeLogic(flags, msgCount, masterFlags);
   }
 
 
-  if(mode == STABLE && (millis() - lastReceivedTime_ms) > txInterval_ms * 2){
-    init_LoRa(onReceive);
+  if(!transmitting && mode == STABLE && (millis() - lastReceivedTime_ms) > txInterval_ms * 2){
+    resetRadio(onReceive);
     LoRa.receive();
     lastReceivedTime_ms = millis();
-    // Serial.println("Starting instable mode");
-    // mode = INSTABLE;
-    // flags = flags | INSTABLE_FLAG;
-    // instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
-    // instableStarted = millis();
-    // nextConfig = thisNodeConf;
-    // tried_conf[0] = false;
-    // tried_conf[1] = false;
-    // tried_conf[2] = false;
-    // tried_conf[3] = false;
-    // if(thisNodeConf.codingRate < 8){
-      // nextConfig.codingRate ++;
-      // tried_conf[2] = true;
-    // }else if(thisNodeConf.spreadingFactor < 12){
-      // nextConfig.spreadingFactor++;
-      // tried_conf[1] = true;
-    // }else if(thisNodeConf.bandwidth_index > 0){
-      // nextConfig.bandwidth_index--;
-      // tried_conf[0] = true;
-    // }else if(thisNodeConf.txPower < 20){
-      // nextConfig.txPower++;
-      // tried_conf[3] = true;
-    // }
-    // printFlags(flags);
-
+  }
+  if(mode == STABLE && (millis() - lastReceivedMasterTime_ms) > max(TIMEOUT_TO_DEFAULT,txInterval_ms * MINIMAL_TX_TO_DEFAULT)){
+    Serial.println("[LOG] Returning to the default");
+    applyConfig(defaultConfig, true);
+    thisNodeConf = defaultConfig;
+    lastReceivedMasterTime_ms = millis();
   }
   // Flags logic
   if(masterFlags) {
@@ -143,10 +133,15 @@ void loop()
         }
 
         if(copyMasterFlags & CONFIG_CHANGE_FLAG) {
-            mode = PROBING;
-            flags = 0;
-            nextConfig = remoteNodeConf;
-            startProbing(txInterval_ms, msgCount, flags);
+            if(copyMasterFlags & CONFIG_NOT_ACCEPTED){
+              nextConfig = remoteNodeConf;
+              applyConfig(remoteNodeConf, true);
+              thisNodeConf = nextConfig;
+            }else{
+              nextConfig = remoteNodeConf;
+              startProbing(txInterval_ms, msgCount, flags);
+            }
+            
       }
 
       if(copyMasterFlags & INSTABLE_FLAG){
@@ -211,11 +206,12 @@ void loop()
       Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
       init_LoRa(onReceive);
       txDoneFlag = true;
+      // flags = flags | CONFIG_NOT_ACCEPTED;
   }
 
   if (transmitting && txDoneFlag) {
 
-    onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive);
+    onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive, flags);
     
     transmitting = false;
     

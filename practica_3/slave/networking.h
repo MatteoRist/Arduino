@@ -35,7 +35,7 @@ Mode mode = STABLE;
 int txIntervals = 0;
 
 #define CONFIG_CHANGE_FLAG 128
-#define SECOND_FLAG 64
+#define CONFIG_NOT_ACCEPTED 64
 #define LOOSING_DATA_FLAG 32
 #define INSTABLE_FLAG 16
 #define INSTABLE_FLAG_ACK 8
@@ -44,17 +44,16 @@ int txIntervals = 0;
 #define EIGHT_FLAG 1
 
 
-static bool tried_conf[4] = {false,false,false,false};
 
 #define RSSI_THRESHOLD -95
 #define RSSI_THRESHOLD_UPPER -50
-#define SNR_THRESHOLD -10
-#define SNR_THRESHOLD_UPPER 10
+const float SNR_THRESHOLD[] = {-2.5, -4, -6.5, -9, -11.5, -13};
+#define SNR_THRESHOLD_UPPER 7.5
 
 volatile int last_packet_RSSI = -60;
 volatile float last_packet_SNR = 0;
 
-#define PROBING_PLANNED_TX_INTERVALS 5
+#define PROBING_PLANNED_TX_INTERVALS 4
 uint32_t probingStarted = 0;
 uint32_t probingPlannedTime = 0;
 #define PROBING_WITHOUT_DATA_TX_INTERVALS 2
@@ -89,7 +88,7 @@ bool ldro_enabled = false;
 // --------------------------------------------------------------------
 
 // Inicjalization and d
-void applyConfig(const LoRaConfig_t conf);
+bool applyConfig(const LoRaConfig_t conf, bool check_difference_and_apply_difference);
 void updateTimingParameters(const LoRaConfig_t& conf);
 uint32_t getTimeOnAirBytes(uint8_t payloadLength);
 typedef void (*LoRaReceiveCallback)(int);
@@ -160,7 +159,7 @@ void printFlags(uint8_t flags) {
   }
 
   if (flags & CONFIG_CHANGE_FLAG)           Serial.print("CONFIG_CHANGE ");
-  if (flags & SECOND_FLAG)         Serial.print("SECOND_FLAG ");
+  if (flags & CONFIG_NOT_ACCEPTED)         Serial.print("CONFIG_NOT_ACCEPTED ");
   if (flags & LOOSING_DATA_FLAG)    Serial.print("LOOSING_DATA ");
   if (flags & INSTABLE_FLAG)        Serial.print("INSTABLE ");
   if (flags & INSTABLE_FLAG_ACK)       Serial.print("INSTABLE_FLAG_ACK ");
@@ -173,18 +172,43 @@ void printFlags(uint8_t flags) {
 /*--------------------------------------------------------------
 Apply new config
 --------------------------------------------------------------*/
-void applyConfig(const LoRaConfig_t conf) {
-
-  LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
-  LoRa.setSpreadingFactor(conf.spreadingFactor);
-  LoRa.setCodingRate4(conf.codingRate);
-  LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
+bool applyConfig(const LoRaConfig_t conf, bool check_difference_and_apply_difference) {
+  bool configChanged = false;
+  if(!check_difference_and_apply_difference){
+    configChanged = true;
+    LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
+    LoRa.setSpreadingFactor(conf.spreadingFactor);
+    LoRa.setCodingRate4(conf.codingRate);
+    LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
+  }else{
+    if(conf.bandwidth_index != thisNodeConf.bandwidth_index){
+      LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
+      configChanged = true;
+    }
+    if(conf.spreadingFactor != thisNodeConf.spreadingFactor){
+      LoRa.setSpreadingFactor(conf.spreadingFactor);
+      configChanged = true;
+    }
+    if(conf.codingRate != thisNodeConf.codingRate){
+      LoRa.setCodingRate4(conf.codingRate);
+      configChanged - true;
+    }
+    if(conf.txPower != thisNodeConf.txPower){
+      LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
+      configChanged = true;
+    }
+  }
+  
+  
   // LoRa.setSyncWord(0x12);
   // LoRa.setPreambleLength(50);
-  Serial.print("\nApplied Config -> SF:"); Serial.print(conf.spreadingFactor);
-  Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
-  Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate); Serial.println();
-  updateTimingParameters(conf);
+  if(configChanged){
+    Serial.print("\nApplied Config -> SF:"); Serial.print(conf.spreadingFactor);
+    Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
+    Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate); Serial.println();
+    updateTimingParameters(conf);
+  }
+  return configChanged;
 
 }
 
@@ -200,9 +224,9 @@ bool inline revertConfig(uint16_t &msgCount, uint8_t &flags){
     if(previousConfig == thisNodeConf){
         previousConfig = defaultConfig;
     } 
-    thisNodeConf = previousConfig;
     nextConfig = previousConfig;
-    applyConfig(thisNodeConf);
+    applyConfig(previousConfig, true);
+    thisNodeConf = previousConfig;
     loosingData = 0;
     txIntervals = 0;
     msgCount = 0;
@@ -214,13 +238,21 @@ bool inline revertConfig(uint16_t &msgCount, uint8_t &flags){
 
 bool inline changeToNewConfig(uint16_t &msgCount, uint8_t &flags){
     previousConfig = thisNodeConf;
+    applyConfig(nextConfig, true);
+    bool isNextSLower = false;
+    if( thisNodeConf.bandwidth_index >= nextConfig.bandwidth_index &&
+        thisNodeConf.spreadingFactor <= nextConfig.spreadingFactor &&
+        thisNodeConf.codingRate <= nextConfig.codingRate){
+          isNextSLower = true;
+    }
     thisNodeConf = nextConfig;
-    applyConfig(thisNodeConf);
     loosingData = 0;
     txIntervals = 0;
     msgCount = 0;
+    flags = 0;
     lastMsgId = 255;
     lastReceivedTime_ms = millis();
+    return isNextSLower;
 }
 
 /*--------------------------------------------------------------
@@ -278,7 +310,7 @@ bool init_LoRa(LoRaReceiveCallback onReceive){
     if (!LoRa.begin(868E6)) {      // Initicializa LoRa a 868 MHz
       Serial.println("LoRa init failed. Check your connections.");            
     }
-    applyConfig(thisNodeConf);
+    applyConfig(thisNodeConf, false);
     LoRa.setSyncWord(0x12);      
 
     LoRa.setPreambleLength(8);     
@@ -299,7 +331,7 @@ bool resetRadio(LoRaReceiveCallback onReceive)
     bool resetWorked = LoRa.reset(868E6);
     LoRa.setSyncWord(0x12);  
     LoRa.setPreambleLength(8);
-    applyConfig(thisNodeConf);
+    applyConfig(thisNodeConf, false);
     LoRa.onReceive(onReceive);
     LoRa.onTxDone(TxFinished);
 
@@ -348,16 +380,19 @@ void inline onReceiveCommon(int packetSize){
   }
 
   int recipient = LoRa.read();
-  if ((recipient & localAddress) != localAddress ) {
-    RECEIVE_DEBUG_PRINTLN("Receiving error: This message is not for me.");
-    RECEIVE_DEBUG_PRINTLN(recipient, HEX);
-    return;
-  } 
   uint8_t sender = LoRa.read();
   if(sender == localAddress){
     RECEIVE_DEBUG_PRINTLN("\n----------->[BUG] Got my own message possible bounce back or hardware problem");
     return;
   }
+
+  lastReceivedTime_ms = millis();
+
+  if ((recipient & localAddress) != localAddress ) {
+    RECEIVE_DEBUG_PRINTLN("Receiving error: This message is not for me.");
+    RECEIVE_DEBUG_PRINTLN(recipient, HEX);
+    return;
+  } 
   uint16_t incomingMsgId = ((uint16_t)LoRa.read() << 8) | (uint16_t)LoRa.read();
 
   if(incomingMsgId == lastMsgId && lastMsgId != 0){
@@ -379,8 +414,10 @@ void inline onReceiveCommon(int packetSize){
     while (LoRa.available() && (receivedBytes < uint8_t(sizeof(LORA_CONFIG_PACKET_BUFFER_SIZE)-1))) {            
       loraConfigPacketFIFO[next].data[receivedBytes++] = LoRa.read();
     }
-    last_packet_RSSI = LoRa.packetRssi();
-    last_packet_SNR = LoRa.packetSnr();
+    int packetRssi = LoRa.packetRssi();
+    if(packetRssi < last_packet_RSSI) last_packet_RSSI = packetRssi;
+    float packetSnr = LoRa.packetSnr();
+    if(packetSnr < last_packet_SNR)last_packet_SNR = packetSnr;
 
     // if (loraConfigPacketFIFO[next].incomingLength  != receivedBytes) {// Verificamos la longitud del mensaje
       // RECEIVE_DEBUG_PRINT("Receiving error: declared message length " + String(loraConfigPacketFIFO[next].incomingLength));
@@ -398,7 +435,6 @@ void inline onReceiveCommon(int packetSize){
   } 
   gotDataProbing++;
   lastMsgId = incomingMsgId;
-  lastReceivedTime_ms = millis();
 
   return;
 
@@ -441,29 +477,24 @@ void inline LoRaPacketContentPrint(uint8_t &readPointer){
 Mode logic
 ----------------------------------------------*/
 
-void inline probingModeLogic(uint8_t &flags, uint16_t &msgCount){
-    if (millis() - lastReceivedTime_ms > (probingPlannedTime/PROBING_PLANNED_TX_INTERVALS)*2) {
-
+void inline probingModeLogic(uint8_t &flags, uint16_t &msgCount, uint8_t &otherFlags){
+    if ((otherFlags & CONFIG_NOT_ACCEPTED) || millis() - lastReceivedTime_ms > (probingPlannedTime/PROBING_PLANNED_TX_INTERVALS)*2) {
+        if(flags & CONFIG_NOT_ACCEPTED == 0){
         Serial.print("\n[CRITICAL] Connection lost! No data received for ");
         Serial.print(probingPlannedTime);
-        Serial.println(" ms. Increasing reverting to last config immediately.");
-        
-        revertConfig(msgCount, flags);
-        mode = STABLE;
-        flags = 0;
-        msgCount = 0;
-        
+        Serial.println(" ms. Increasing reverting to last config after timeout.");
+        }
+        flags = flags | CONFIG_NOT_ACCEPTED;
     }
 
     if((millis() - probingStarted) > probingPlannedTime){
-      if(!loosingData && gotDataProbing > PROBING_PLANNED_TX_INTERVALS/2){
+      Serial.print(flags & CONFIG_NOT_ACCEPTED);
+      if((flags & CONFIG_NOT_ACCEPTED) == 0){
         mode = STABLE;
         flags = 0;
-        tried_conf[0] = false;
-        tried_conf[1] = false;
-        tried_conf[2] = false;
-        tried_conf[3] = false;
+        Serial.println("[LOG] Accepted new config");
       } else{
+        Serial.println("[LOG] new config not accepted");
         revertConfig(msgCount, flags);
         mode = STABLE;
         flags = 0;
@@ -473,26 +504,34 @@ void inline probingModeLogic(uint8_t &flags, uint16_t &msgCount){
 }
 
 void inline startProbing(uint32_t &txInterval_ms, uint16_t &msgCount, uint8_t &flags){
+    mode = PROBING;
     gotDataProbing = 0;
     probingStarted = millis();
-    probingPlannedTime = txInterval_ms * PROBING_PLANNED_TX_INTERVALS;
-    probingWithoutData = txInterval_ms * PROBING_WITHOUT_DATA_TX_INTERVALS;
-    Serial.print("Probing started  "); Serial.print(probingStarted); Serial.print("  probingPlannedTime "); Serial.println(probingPlannedTime);
-
-    changeToNewConfig(msgCount, flags);
+    if(!changeToNewConfig(msgCount, flags)){
+      probingPlannedTime = txInterval_ms * PROBING_PLANNED_TX_INTERVALS;
+      probingWithoutData = txInterval_ms * PROBING_WITHOUT_DATA_TX_INTERVALS;
+      Serial.print("Probing for faster config started  "); Serial.print(probingStarted); Serial.print("  probingPlannedTime "); Serial.println(probingPlannedTime);
+      
+    } else{
+      probingPlannedTime = txInterval_ms * PROBING_PLANNED_TX_INTERVALS*6;
+      probingWithoutData = txInterval_ms * PROBING_WITHOUT_DATA_TX_INTERVALS*6;
+      Serial.print("Probing for slower config started  "); Serial.print(probingStarted); Serial.print("  probingPlannedTime "); Serial.println(probingPlannedTime);
+    }
+    
 }
 
   /*-----------------------------------------------------------
   TX ended logic
   -----------------------------------------------------------*/
 
-void inline onTXCommon(uint32_t &tx_begin_ms, uint32_t &lastSendTime_ms, uint32_t &txInterval_ms, LoRaReceiveCallback onReceive){
+void inline onTXCommon(uint32_t &tx_begin_ms, uint32_t &lastSendTime_ms, uint32_t &txInterval_ms, LoRaReceiveCallback onReceive, uint8_t &flags){
     uint32_t TxTime_ms = min(millis() - tx_begin_ms, theoreticalTimeOnAir);
 
-    if (digitalRead(LORA_DEFAULT_DIO0_PIN) == HIGH){
-      Serial.println("\n----------->[BUG] LORA DIO0 PIN should be low");
-      resetRadio(onReceive);
-    }
+    // if (digitalRead(LORA_DEFAULT_DIO0_PIN) == HIGH){
+      // Serial.println("\n----------->[BUG] LORA DIO0 PIN should be low");
+      // resetRadio(onReceive);
+      // flags = flags | CONFIG_NOT_ACCEPTED;
+    // }
     
     Serial.print("----> TX completed in ");
     Serial.print(TxTime_ms);
