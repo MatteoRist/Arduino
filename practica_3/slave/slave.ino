@@ -80,14 +80,14 @@ void loop()
   if(loraConfigPackeSize){
     uint8_t readPointer = loraConfigPacketRead;
     masterFlags = loraConfigPacketFIFO[readPointer].flags;
-    if(loraConfigPacketFIFO[readPointer].incomingLength == 4){
+    // if(loraConfigPacketFIFO[readPointer].incomingLength == 4){
       remoteNodeConf.bandwidth_index = loraConfigPacketFIFO[readPointer].data[0] >> 4;
       remoteNodeConf.spreadingFactor = 6 + ((loraConfigPacketFIFO[readPointer].data[0] & 0x0F) >> 1);
       remoteNodeConf.codingRate = 5 + (loraConfigPacketFIFO[readPointer].data[1] >> 6);
       remoteNodeConf.txPower = 2 + ((loraConfigPacketFIFO[readPointer].data[1] & 0x3F) >> 1);
       remoteRSSI = -int(loraConfigPacketFIFO[readPointer].data[2]) / 2.0f;
       remoteSNR  =  int(loraConfigPacketFIFO[readPointer].data[3]) - 148;
-    }
+    // }
     #ifdef RECEIVE_DEBUG_PRINT_ON
       RECEIVE_DEBUG_PRINT("Flags received ");
       printFlags(masterFlags);    
@@ -171,7 +171,7 @@ void loop()
     payload[payloadLength++] = uint8_t(-LoRa.packetRssi() * 2);
     // SNR puede estar en un rango de [20, -148] dBm
     payload[payloadLength++] = uint8_t(148 + LoRa.packetSnr());
-    
+    payloadLength = 4;
     
     if(sendMessage(payload, payloadLength, msgCount, flags)){
     
@@ -207,7 +207,7 @@ void loop()
   -----------------------------------------------------------*/
 
   // hardware bug fix
-  if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir){
+  if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir*1.5){
       Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
       init_LoRa(onReceive);
       txDoneFlag = true;

@@ -75,14 +75,14 @@ void loop()
       uint8_t readPointer = loraConfigPacketRead;
       RECEIVE_DEBUG_PRINT("Flags received ");
       printFlags(masterFlags);
-      if(loraConfigPacketFIFO[readPointer].incomingLength == 4){
+      // if(loraConfigPacketFIFO[readPointer].incomingLength == 4){
         remoteNodeConf.bandwidth_index = loraConfigPacketFIFO[readPointer].data[0] >> 4;
         remoteNodeConf.spreadingFactor = 6 + ((loraConfigPacketFIFO[readPointer].data[0] & 0x0F) >> 1);
         remoteNodeConf.codingRate = 5 + (loraConfigPacketFIFO[readPointer].data[1] >> 6);
         remoteNodeConf.txPower = 2 + ((loraConfigPacketFIFO[readPointer].data[1] & 0x3F) >> 1);
         remoteRSSI = -int(loraConfigPacketFIFO[readPointer].data[2]) / 2.0f;
         remoteSNR  =  int(loraConfigPacketFIFO[readPointer].data[3]) - 148;
-      }
+      // }
 
       LoRaPacketContentPrint(readPointer);
     #endif
@@ -157,7 +157,7 @@ void loop()
     payload[payloadLength++] = uint8_t(-last_packet_RSSI * 2);
     // SNR puede estar en un rango de [20, -148] dBm
     payload[payloadLength++] = uint8_t(148 + last_packet_SNR);
-    
+    payloadLength = 4;
 
     
     if(sendMessage(payload, payloadLength, msgCount, flags)){
@@ -188,7 +188,7 @@ void loop()
     }
   }       
   
-  if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir){
+  if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir*1.5){
       Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
       init_LoRa(onReceive);
       txDoneFlag = true;
@@ -208,12 +208,12 @@ void loop()
         startProbing(txInterval_ms, msgCount, flags);
       // }
     }
-    if(mode == STABLE && loosingData){
-      Serial.println("Starting instable mode");
-      mode = INSTABLE;
-      instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
-      instableStarted = millis();
-    }
+    // if(mode == STABLE && loosingData){
+      // Serial.println("Starting instable mode");
+      // mode = INSTABLE;
+      // instablePlannedTime = txInterval_ms * INSTABLE_PLANNED_TX_INTERVALS;
+      // instableStarted = millis();
+    // }
     transmitting = false;
     LoRa.receive();
     
@@ -230,7 +230,8 @@ void onReceive(int packetSize)
 
 void inline optimizeConfig(uint8_t &flags){
   bool lowerTXPower = false;
-  bool lowerBW = false;
+  bool fasterBW = false;
+  bool lowerBW = false; 
   if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
         Serial.print("Lora RSSI below threshold"); Serial.print(last_packet_RSSI); Serial.print(" < "); Serial.println(RSSI_THRESHOLD);
         nextConfig = thisNodeConf;
@@ -246,8 +247,8 @@ void inline optimizeConfig(uint8_t &flags){
     } 
     else if (last_packet_SNR > SNR_THRESHOLD_UPPER){
       if(thisNodeConf.bandwidth_index < 9){
-        lowerBW = true;
-      txIntervals = min(++txIntervals,TX_INTERVAL_BEFORE_PROBING);
+        fasterBW = true;
+        txIntervals = min(++txIntervals,TX_INTERVAL_BEFORE_PROBING);
       } else{
       if(thisNodeConf.txPower > 2){
         lowerTXPower = true;
@@ -255,36 +256,31 @@ void inline optimizeConfig(uint8_t &flags){
       }
     } else if (last_packet_SNR < SNR_THRESHOLD){
       Serial.print("Lora SNR below threshold"); Serial.print(last_packet_SNR); Serial.print(" < "); Serial.println(SNR_THRESHOLD);
-        nextConfig = thisNodeConf;
-        nextConfig.bandwidth_index--;
-        tried_conf[0] = true;
-        tried_conf[1] = false;
-        tried_conf[2] = false;
-        tried_conf[3] = false;
-        flags = flags | CONFIG_CHANGE_FLAG;
-        printFlags(flags);
+      lowerBW = true;
     }
 
   if(mode == STABLE && txIntervals ==TX_INTERVAL_BEFORE_PROBING){
       nextConfig = thisNodeConf;
-      if(lowerTXPower){
-        
+
+      if(lowerBW){
+        flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index--;
+      }if(lowerTXPower){
         flags = CONFIG_CHANGE_FLAG; nextConfig.txPower--;
         lowerTXPower = false;
-      } else if(lowerBW){
+      } else if(fasterBW){
         flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
       }
-      else if(!tried_conf[1]){
-        if(thisNodeConf.spreadingFactor == 7){ tried_conf[1] = true;}
-        else{flags = CONFIG_CHANGE_FLAG; nextConfig.spreadingFactor--;}
+      else if(!tried_conf[1] && thisNodeConf.spreadingFactor != 7){
+        tried_conf[1] = true;
+        flags = CONFIG_CHANGE_FLAG; nextConfig.spreadingFactor--;
       }
-      else if(!tried_conf[0]){
-        if(thisNodeConf.bandwidth_index == 9){ tried_conf[0] = true;}
-        else{flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;}
+      else if(!tried_conf[0] && thisNodeConf.bandwidth_index != 9){
+        tried_conf[0] = true;
+        flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
       }
-      else if (!tried_conf[2]){
-        if(thisNodeConf.codingRate == 5){ tried_conf[2] = true;}
-        else{flags = CONFIG_CHANGE_FLAG; nextConfig.codingRate--;}
+      else if (!tried_conf[2] && thisNodeConf.codingRate != 5){
+        tried_conf[2] = true;
+        flags = CONFIG_CHANGE_FLAG; nextConfig.codingRate--;
       }else{
         txIntervals = 0;
       }

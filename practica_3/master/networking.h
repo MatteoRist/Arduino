@@ -20,7 +20,7 @@ typedef struct {
 double bandwidth_kHz[10] = {7.8E3, 10.4E3, 15.6E3, 20.8E3, 31.25E3,
                             41.7E3, 62.5E3, 125E3, 250E3, 500E3 };
 
-LoRaConfig_t defaultConfig = { 6, 10, 5, 2};
+LoRaConfig_t defaultConfig = { 7, 9, 5, 2};
 LoRaConfig_t thisNodeConf   = defaultConfig;
 LoRaConfig_t remoteNodeConf = { 0,  0, 0, 0};
 int remoteRSSI = 0;
@@ -72,6 +72,10 @@ volatile uint32_t lastReceivedTime_ms = 0;
 LoRaConfig_t previousConfig = thisNodeConf;
 LoRaConfig_t nextConfig = thisNodeConf;
 
+
+// Restaring variables
+#define LORA_MINIMUM_TIME_BETWEEN_RESTARTS 400
+uint32_t LoRaLastRestart_timestamp = 0;
 // TX variables 
 uint8_t PREAMBLE_LEN = 8;
 uint32_t theoreticalTimeOnAir = 0;
@@ -89,7 +93,7 @@ void applyConfig(const LoRaConfig_t conf);
 void updateTimingParameters(const LoRaConfig_t& conf);
 uint32_t getTimeOnAirBytes(uint8_t payloadLength);
 typedef void (*LoRaReceiveCallback)(int);
-void init_LoRa(LoRaReceiveCallback onReceive);
+bool init_LoRa(LoRaReceiveCallback onReceive);
 
 // sendinf and getting
 bool sendMessage(uint8_t* payload, uint8_t payloadLength, uint16_t msgCount, uint8_t flags);
@@ -180,7 +184,6 @@ void applyConfig(const LoRaConfig_t conf) {
   Serial.print("\nApplied Config -> SF:"); Serial.print(conf.spreadingFactor);
   Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
   Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate); Serial.println();
-  Serial.println('\n\n');
   updateTimingParameters(conf);
 
 }
@@ -192,21 +195,11 @@ inline bool operator==(const LoRaConfig_t& a, const LoRaConfig_t& b) {
            a.txPower == b.txPower;
 }
 
-inline bool operator>(const LoRaConfig_t& a, const LoRaConfig_t& b){
-    return a.bandwidth_index > b.bandwidth_index ||
-           a.spreadingFactor < b.spreadingFactor ||
-           a.codingRate < b.codingRate ||
-           a.txPower < b.txPower;
-}
 
 bool inline revertConfig(uint16_t &msgCount, uint8_t &flags){
     if(previousConfig == thisNodeConf){
         previousConfig = defaultConfig;
-    } else if(previousConfig > thisNodeConf){
-        previousConfig = thisNodeConf;
-        min(12,previousConfig.spreadingFactor++);
-    }
-
+    } 
     thisNodeConf = previousConfig;
     nextConfig = previousConfig;
     applyConfig(thisNodeConf);
@@ -234,7 +227,6 @@ bool inline changeToNewConfig(uint16_t &msgCount, uint8_t &flags){
 Calculating theory time in tx
 --------------------------------------------------------------*/
 
-// Wywołujemy w applyConfig()
 void updateTimingParameters(const LoRaConfig_t& conf) {
     // 1. czas trwania symbolu (Ts) w ms
     double bw_hz = bandwidth_kHz[conf.bandwidth_index];
@@ -250,24 +242,28 @@ void updateTimingParameters(const LoRaConfig_t& conf) {
     cr_eff = conf.codingRate; // przechowujemy raz, użyjemy później
 }
 
-// --- Funkcja zwracająca czas nadawania dla dowolnej ilości bajtów ---
 uint32_t getTimeOnAirBytes(uint8_t payloadLength) {
-    if (symbol_duration_ms == 0) return 0;
+    // ... (definitions and checks)
 
     int de = ldro_enabled ? 1 : 0;
-    int H = 0;          // Explicit header
-    int CRC = 1;        // CRC enabled
+    int H = 0;          // Explicit header (Assumed 0 for Explicit, 1 for Implicit)
+    int CRC = 0;       
     uint8_t sf = thisNodeConf.spreadingFactor;
-    int CR = thisNodeConf.codingRate - 4; // CR=5 -> 1
+    int CR = thisNodeConf.codingRate; // CR is 5-8
 
-    long bits_needed = 8*payloadLength - 4*sf + 28 + 16*CRC - 20*H;
-    long divisor = 4 * (sf - 2*de);
-    long num_blocks = (bits_needed + divisor - 1)/divisor;
+    // Numerator: (8 * PL - 4 * SF + 28 - 20 * H + 16 * CRC)
+    long bits_needed = 8 * payloadLength - 4 * sf + 28 + 16 * CRC - 20 * H;
+    
+    // Denominator: 4 * (SF - 2*DE)
+    long divisor = 4 * (sf - 2 * de);
+    
+    // Ceiling division of the main fraction: num_blocks = ceil(Numerator / Denominator)
+    long num_blocks = (bits_needed + divisor - 1) / divisor;
 
     if(num_blocks < 0) num_blocks = 0;
 
-    // CR+4, bo biblioteka używa wartości 1-4 zamiast 5-8
-    long payload_symbols = 8 + num_blocks * cr_eff;
+    // Total Symbols: 8 + num_blocks * CR
+    long payload_symbols = 8 + num_blocks * CR;
 
     float total_time_ms = header_preamble_time_ms + payload_symbols * symbol_duration_ms;
     return (uint16_t)total_time_ms;
@@ -277,27 +273,30 @@ LoRa init
 --------------------------------------------------------------*/
 typedef void (*LoRaReceiveCallback)(int);
 
-void init_LoRa(LoRaReceiveCallback onReceive){
+bool init_LoRa(LoRaReceiveCallback onReceive){
+  if(millis() - LoRaLastRestart_timestamp > LORA_MINIMUM_TIME_BETWEEN_RESTARTS){
+    if (!LoRa.begin(868E6)) {      // Initicializa LoRa a 868 MHz
+      Serial.println("LoRa init failed. Check your connections.");            
+    }
+    applyConfig(thisNodeConf);
+    LoRa.setSyncWord(0x12);      
 
-  if (!LoRa.begin(868E6)) {      // Initicializa LoRa a 868 MHz
-    Serial.println("LoRa init failed. Check your connections.");
-    while (true);                
+    LoRa.setPreambleLength(8);     
+
+
+    LoRa.onReceive(onReceive);
+    LoRa.onTxDone(TxFinished);
+    LoRaLastRestart_timestamp = millis();
+    return true;
   }
-  applyConfig(thisNodeConf);
-  LoRa.setSyncWord(0x12);      
-
-  LoRa.setPreambleLength(8);     
-
-  
-  LoRa.onReceive(onReceive);
-  LoRa.onTxDone(TxFinished);
-
+  return false;
 }
 
 
 bool resetRadio(LoRaReceiveCallback onReceive)
 {
-    LoRa.reset(868E6);
+    if(millis() - LoRaLastRestart_timestamp > LORA_MINIMUM_TIME_BETWEEN_RESTARTS){
+    bool resetWorked = LoRa.reset(868E6);
     LoRa.setSyncWord(0x12);  
     LoRa.setPreambleLength(8);
     applyConfig(thisNodeConf);
@@ -305,6 +304,10 @@ bool resetRadio(LoRaReceiveCallback onReceive)
     LoRa.onTxDone(TxFinished);
 
     LoRa.idle();
+    LoRaLastRestart_timestamp = millis();
+    return resetWorked;
+    }
+    return false;
 }
 
 /*-------------------------------
@@ -313,11 +316,9 @@ Receiving logic
 
 #define RECEIVE_DEBUG_PRINT_ON
 #ifdef RECEIVE_DEBUG_PRINT_ON
-    // Tryb debugowania: MAKRA są faktycznymi wywołaniami Serial
     #define RECEIVE_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)
     #define RECEIVE_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
 #else
-    // Tryb produkcyjny: MAKRA są PUSTE i zostaną usunięte przez kompilator
     #define RECEIVE_DEBUG_PRINT(...) 
     #define RECEIVE_DEBUG_PRINTLN(...) 
 #endif
@@ -505,9 +506,5 @@ void inline onTXCommon(uint32_t &tx_begin_ms, uint32_t &lastSendTime_ms, uint32_
     Serial.print("Duty cycle: ");
     Serial.print(duty_cycle, 1);
     Serial.println(" %\n");
-
-    // Solo si el ciclo de trabajo es superior al 1% lo ajustamos
-    // if (duty_cycle > 1.0f) {
-      txInterval_ms = TxTime_ms * 100;
-    // }
+    txInterval_ms = TxTime_ms * 100;
 }
