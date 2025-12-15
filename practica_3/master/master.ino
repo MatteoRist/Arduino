@@ -113,7 +113,7 @@ void loop()
     init_LoRa(onReceive);
     LoRa.receive();
     lastReceivedTime_ms = millis();
-    Serial.println("init again");
+    // Serial.println("init again");
   }
 
   
@@ -282,6 +282,7 @@ void inline optimizeConfig(uint8_t &flags){
           }else {
             txIntervals = 0;
           }
+          Serial.print("AVG_SNR: "); Serial.print(last_packet_SNR); Serial.print("  AVG_RSSI  "); Serial.println(last_packet_RSSI);
           last_packet_RSSI = 10;
           last_packet_SNR = 10;
           number_of_msg_avg = 0;

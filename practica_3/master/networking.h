@@ -363,7 +363,7 @@ volatile uint8_t             loraConfigPackeSize = 0;
 volatile uint8_t             loraConfigPacketRead = 0;
 
 void inline onReceiveCommon(int packetSize){
-  Serial.println("got packet");
+  // Serial.println("got packet");
   if (transmitting){ 
     RECEIVE_DEBUG_PRINTLN("\n----------->[BUG] radio should be idle");
   }
