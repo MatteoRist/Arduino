@@ -35,7 +35,7 @@ void setup()
   Serial.begin(115200);  
   while (!Serial); 
 
-  Serial.println("LoRa Duplex with TxDone and Receive callbacks");
+  Serial.println("LoRa Duplexwith TxDone and Receive callbacks");
   Serial.println("Using binary packets");
   
   // Es posible indicar los pines para CS, reset e IRQ pins (opcional)
@@ -69,6 +69,7 @@ void loop()
   static uint8_t flags = 0;
   static bool defaultConfigDetection = false;
   static bool gotMsg;
+  static uint8_t preprobingTimes = 0;
   
   uint8_t masterFlags = 0;
   if(loraConfigPackeSize){
@@ -90,36 +91,29 @@ void loop()
 
       LoRaPacketContentPrint(readPointer);
     #endif
+    #if DEBUG
     Serial.print("Flags received ");
     printFlags(masterFlags);
+    #endif
     loraConfigPacketRead = (loraConfigPacketRead+1) % LORA_CONFIG_PACKET_BUFFER_SIZE;
     loraConfigPackeSize--;
     gotMsg = true;
   }
 
 
-  if(mode == INSTABLE ){
-    flags = flags | INSTABLE_FLAG;
-    if((millis() - instableStarted) > instablePlannedTime){
-      mode = STABLE;
-      flags = 0;
-      msgCount = 0;
-      revertConfig(msgCount, flags);
-    }
-  }
-
   if(masterFlags){
     if(masterFlags & CONFIG_CHANGE_FLAG){
       startProbing(txInterval_ms, msgCount, flags);
-      txInterval_ms = 0;
+      // txInterval_ms = 0;
     }
   }
 
   // Restarting radio just in case
-  if(!transmitting && mode == STABLE && (millis() - lastReceivedTime_ms) > txInterval_ms * 3){
-    resetRadio(onReceive);
+  if(!transmitting && (mode == STABLE || mode == PRE_PROBING) && (millis() - lastReceivedTime_ms) > txInterval_ms * 3){
+    init_LoRa(onReceive);
     LoRa.receive();
     lastReceivedTime_ms = millis();
+    Serial.println("init again");
   }
 
   
@@ -133,8 +127,9 @@ void loop()
       defaultConfigDetection = true;
 
     }else{
-      Serial.print("Want to transmit msg");
-
+      #if DEBUG
+      Serial.println("Want to transmit msg");
+      #endif
       if(gotMsg){
         optimizeConfig(flags);
         gotMsg = false;
@@ -156,30 +151,23 @@ void loop()
       payloadLength = 4;
 
 
-      if(sendMessage(payload, payloadLength, msgCount, flags, !(flags & CONFIG_CHANGE_FLAG))){
+      if(sendMessage(payload, payloadLength, msgCount, flags, !((flags & CONFIG_CHANGE_FLAG) || SYNC))){
       
       transmitting = true;
-      txDoneFlag = (flags & CONFIG_CHANGE_FLAG);
-      tx_begin_ms = millis() - theoreticalTimeOnAir*(!!(flags & CONFIG_CHANGE_FLAG)); 
-      
+      txDoneFlag = ((flags & CONFIG_CHANGE_FLAG) || SYNC);
+      tx_begin_ms = millis() - theoreticalTimeOnAir*(!!((flags & CONFIG_CHANGE_FLAG) || SYNC)); 
+      #if DEBUG
       Serial.print("Sending packet ");
       Serial.print(msgCount++);
       Serial.print(" flags sent ");
       printFlags(flags);
       Serial.print(": ");
       printBinaryPayload(payload, payloadLength);
-      
-      if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
-          flags = 0;
-          msgCount = 0;
-          changeToNewConfig(msgCount, flags);
-          mode = STABLE;
-          Serial.print("RSSI back");
-
-          printFlags(flags);
-      }
+      #endif
       }else{
+        #if DEBUG
         Serial.print("Blad wysylanie pakietu");
+        #endif
       }
 
       if(mode == PROBING){
@@ -192,7 +180,9 @@ void loop()
 
   if (transmitting && txDoneFlag) {
     if(defaultConfigDetection){
+      #if DEBUG
       Serial.print("After default transmission");
+      #endif
       applyConfig(thisNodeConf, false);
       defaultConfigDetection = false;
     }
@@ -200,11 +190,21 @@ void loop()
 
     transmitting = false;
     LoRa.receive();
+    if(mode == PRE_PROBING){
+      preprobingTimes++;
+      if(preprobingTimes>5){
+        mode = STABLE;
+        preprobingTimes=0;
+        txIntervals=0;
+      }
+    }
     
   }
 
   if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir*1.5){
+    #if DEBUG
       Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
+    #endif
       init_LoRa(onReceive);
       txDoneFlag = true;
       // flags = flags | CONFIG_NOT_ACCEPTED;
@@ -223,14 +223,14 @@ void inline optimizeConfig(uint8_t &flags){
   bool lowerTXPower = false;
   bool fasterBW = false;
   bool lowSnr = false; 
-  if(mode == STABLE){
+  if(mode == STABLE && number_of_msg_avg>0){
     if(last_packet_RSSI < RSSI_THRESHOLD && thisNodeConf.txPower < 20){
           Serial.print("Lora RSSI below threshold"); Serial.print(last_packet_RSSI); Serial.print(" < "); Serial.println(RSSI_THRESHOLD);
           nextConfig = thisNodeConf;
           nextConfig.txPower++;
             applyConfig(nextConfig, true);
             thisNodeConf = nextConfig;
-            last_packet_RSSI = RSSI_THRESHOLD + 1;
+            last_packet_RSSI = RSSI_THRESHOLD + 10;
         } else if (last_packet_SNR < SNR_THRESHOLD[thisNodeConf.spreadingFactor-7]){
           Serial.print("Lora SNR below threshold"); Serial.print(last_packet_SNR); Serial.print(" < "); Serial.println(SNR_THRESHOLD[thisNodeConf.spreadingFactor-7]);
           lowSnr = true;
@@ -282,13 +282,12 @@ void inline optimizeConfig(uint8_t &flags){
           }else {
             txIntervals = 0;
           }
-          printFlags(flags);
           last_packet_RSSI = 10;
           last_packet_SNR = 10;
+          number_of_msg_avg = 0;
     }
     if(flags & CONFIG_CHANGE_FLAG){
       mode = PRE_PROBING;
-      resetRadio(onReceive);
     }
     txIntervals++;
     }
@@ -302,12 +301,14 @@ void inline sendDetectionConfig(){
   payload[1]    = ((thisNodeConf.codingRate - 5) << 6);
   payload[1] |= ((thisNodeConf.txPower - 2) << 1);
   if(sendMessage(payload, 4, 255, CONFIG_CHANGE_FLAG | CONFIG_NOT_ACCEPTED, true)){
+    #if DEBUG
     Serial.print("Sending packet ");
     Serial.print(255);
     Serial.print(" flags sent ");
     printFlags(CONFIG_CHANGE_FLAG | CONFIG_NOT_ACCEPTED);
     Serial.print(": ");
     printBinaryPayload(payload, 4);
+    #endif
   }
   last_default_config_detection_ts = millis();
 }

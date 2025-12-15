@@ -3,6 +3,8 @@
 
 #define TX_LAPSE_MS          10000
 
+#define SYNC 0
+
 const uint8_t MASTER_IP = 0xB0;
 const uint8_t SLAVE_IP = 0xB1;
 uint8_t localAddress; 
@@ -44,7 +46,7 @@ int txIntervals = 0;
 #define SIXTH_FLAG 4
 #define SEVENTH_FLAG 2
 #define EIGHT_FLAG 1
-
+// #define DEBUG 1
 
 
 #define RSSI_THRESHOLD -105
@@ -52,7 +54,8 @@ int txIntervals = 0;
 const float SNR_THRESHOLD[] = {-2.5, -4, -6.5, -9, -11.5, -13};
 #define SNR_THRESHOLD_UPPER 7.5
 
-volatile int last_packet_RSSI = -60;
+volatile int last_packet_RSSI = 0;
+volatile int number_of_msg_avg = 0;
 volatile float last_packet_SNR = 0;
 
 #define PROBING_PLANNED_TX_INTERVALS 4
@@ -67,7 +70,6 @@ uint16_t instablePlannedTime = 0;
 
 volatile int lastMsgId = 255;
 volatile uint8_t loosingData = false;
-volatile uint8_t gotDataProbing = 0;
 volatile uint32_t lastReceivedTime_ms = 0;
 
 LoRaConfig_t previousConfig = thisNodeConf;
@@ -75,7 +77,7 @@ LoRaConfig_t nextConfig = thisNodeConf;
 
 
 // Restaring variables
-#define LORA_MINIMUM_TIME_BETWEEN_RESTARTS 400
+#define LORA_MINIMUM_TIME_BETWEEN_RESTARTS 700
 uint32_t LoRaLastRestart_timestamp = 0;
 // TX variables 
 uint8_t PREAMBLE_LEN = 8;
@@ -126,7 +128,9 @@ bool sendMessage(uint8_t* payload, uint8_t payloadLength, uint16_t msgCount, uin
   LoRa.endPacket(async);                   
 
   theoreticalTimeOnAir = getTimeOnAirBytes(payloadLength+6);
+  #if DEBUG
   Serial.print("Theory time on Air:  "); Serial.println(theoreticalTimeOnAir);
+  #endif
   return true;
 }
 
@@ -206,8 +210,9 @@ bool applyConfig(const LoRaConfig_t conf, bool check_difference_and_apply_differ
     updateTimingParameters(conf);
     if(!(conf == defaultConfig)){
       Serial.print("Applied Config -> SF:"); Serial.print(conf.spreadingFactor);
-      Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
-      Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate);
+      Serial.print("  BW_IDX:"); Serial.print(conf.bandwidth_index);
+      Serial.print("  CODING_RATE  "); Serial.print(conf.codingRate);
+      Serial.print("  TX_Power"); Serial.println(conf.txPower);
     }else{
       Serial.println("Applied basic config");
       
@@ -330,22 +335,6 @@ bool init_LoRa(LoRaReceiveCallback onReceive){
 }
 
 
-bool resetRadio(LoRaReceiveCallback onReceive)
-{
-    if(millis() - LoRaLastRestart_timestamp > LORA_MINIMUM_TIME_BETWEEN_RESTARTS){
-    bool resetWorked = LoRa.reset(868E6);
-    LoRa.setSyncWord(0x25);  
-    LoRa.setPreambleLength(8);
-    applyConfig(thisNodeConf, false);
-    LoRa.onReceive(onReceive);
-    LoRa.onTxDone(TxFinished);
-
-    LoRa.idle();
-    LoRaLastRestart_timestamp = millis();
-    return resetWorked;
-    }
-    return false;
-}
 
 /*-------------------------------
 Receiving logic
@@ -374,7 +363,7 @@ volatile uint8_t             loraConfigPackeSize = 0;
 volatile uint8_t             loraConfigPacketRead = 0;
 
 void inline onReceiveCommon(int packetSize){
-
+  Serial.println("got packet");
   if (transmitting){ 
     RECEIVE_DEBUG_PRINTLN("\n----------->[BUG] radio should be idle");
   }
@@ -419,10 +408,9 @@ void inline onReceiveCommon(int packetSize){
     while (LoRa.available() && (receivedBytes < LORA_CONFIG_PACKET_BUFFER_SIZE-1)) {            
       loraConfigPacketFIFO[next].data[receivedBytes++] = LoRa.read();
     }
-    int packetRssi = LoRa.packetRssi();
-    if(packetRssi < last_packet_RSSI) last_packet_RSSI = packetRssi;
-    float packetSnr = LoRa.packetSnr();
-    if(packetSnr < last_packet_SNR)last_packet_SNR = packetSnr;
+    last_packet_RSSI = (last_packet_RSSI*number_of_msg_avg + LoRa.packetRssi())/(number_of_msg_avg+1);
+    last_packet_SNR = (last_packet_SNR*number_of_msg_avg + LoRa.packetSnr())/(number_of_msg_avg+1);
+    number_of_msg_avg++;
 
     // if (loraConfigPacketFIFO[next].incomingLength  != receivedBytes) {// Verificamos la longitud del mensaje
       // RECEIVE_DEBUG_PRINT("Receiving error: declared message length " + String(loraConfigPacketFIFO[next].incomingLength));
@@ -433,12 +421,7 @@ void inline onReceiveCommon(int packetSize){
     RECEIVE_DEBUG_PRINTLN("[ERROR] Not enough space in buffer");
   }
 
-  // Should be changed but do not know for what
-  if(lastMsgId-incomingMsgId > 1 && lastMsgId-incomingMsgId < 100){
-    RECEIVE_DEBUG_PRINT("\nLost message lastMsgId"); RECEIVE_DEBUG_PRINT(lastMsgId); RECEIVE_DEBUG_PRINT(" incoming id "); RECEIVE_DEBUG_PRINTLN(incomingMsgId);
-    loosingData = true;
-  } 
-  gotDataProbing++;
+  
   lastMsgId = incomingMsgId;
 
   return;
@@ -491,11 +474,13 @@ void inline probingModeLogic(uint8_t &flags, uint16_t &msgCount, uint8_t &otherF
         return;
     }
     if ((otherFlags & CONFIG_NOT_ACCEPTED) || millis() - lastReceivedTime_ms > (probingPlannedTime/PROBING_PLANNED_TX_INTERVALS)*2) {
+      #if DEBUG
         if(flags & CONFIG_NOT_ACCEPTED == 0){
         Serial.print("\n--------->[CRITICAL] Connection lost! No data received for ");
         Serial.print(probingPlannedTime);
         Serial.println(" ms. Increasing reverting to last config after timeout.");
         }
+      #endif
         flags = flags | CONFIG_NOT_ACCEPTED;
     }
     if(((flags & CONFIG_NOT_ACCEPTED) == 0) && (millis() - probingStarted) > probingPlannedTime){
@@ -511,7 +496,6 @@ void inline probingModeLogic(uint8_t &flags, uint16_t &msgCount, uint8_t &otherF
 
 void inline startProbing(uint32_t &txInterval_ms, uint16_t &msgCount, uint8_t &flags){
     mode = PROBING;
-    gotDataProbing = 0;
     probingStarted = millis();
     if(!changeToNewConfig(msgCount, flags)){
       probingPlannedTime = txInterval_ms * PROBING_PLANNED_TX_INTERVALS;

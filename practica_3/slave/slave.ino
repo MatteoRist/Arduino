@@ -118,8 +118,10 @@ void loop()
 
 
   if(!transmitting && mode == STABLE && (millis() - lastReceivedTime_ms) > txInterval_ms * 2){
-    resetRadio(onReceive);
+    init_LoRa(onReceive);
     LoRa.receive();
+    Serial.println("Maybe init");
+    txInterval_ms = getTimeOnAirBytes(10)*100;
     lastReceivedTime_ms = millis();
   }
   if(mode == STABLE && (millis() - lastReceivedMasterTime_ms) > max(TIMEOUT_TO_DEFAULT,txInterval_ms * MINIMAL_TX_TO_DEFAULT)){
@@ -168,12 +170,12 @@ void loop()
       // SNR puede estar en un rango de [20, -148] dBm
       payload[payloadLength++] = uint8_t(148 + LoRa.packetSnr());
       payloadLength = 4;
-      
-      if(sendMessage(payload, payloadLength, msgCount, flags, !(flags & CONFIG_CHANGE_FLAG))){
+      delay(10);
+      if(sendMessage(payload, payloadLength, msgCount, flags, !((flags & CONFIG_CHANGE_FLAG) || SYNC))){
       Serial.print(!(flags & CONFIG_CHANGE_FLAG));
       transmitting = true;
-      txDoneFlag = (flags & CONFIG_CHANGE_FLAG);
-      tx_begin_ms = millis() - theoreticalTimeOnAir*(!!(flags & CONFIG_CHANGE_FLAG)); 
+      txDoneFlag = ((flags & CONFIG_CHANGE_FLAG) || SYNC);
+      tx_begin_ms = millis() - theoreticalTimeOnAir*(!!((flags & CONFIG_CHANGE_FLAG) || SYNC)); 
 
       Serial.print("Sending packet ");
       Serial.print(msgCount++);
@@ -196,10 +198,6 @@ void loop()
 
     onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive, flags);
 
-    if (digitalRead(LORA_DEFAULT_DIO0_PIN) == HIGH){
-      Serial.println("\n----------->[BUG] LORA DIO0 PIN should be low");
-      resetRadio(onReceive);
-    }
     transmitting = false;
     if(flags & CONFIG_CHANGE_FLAG){
       startProbing(txInterval_ms, msgCount, flags);
