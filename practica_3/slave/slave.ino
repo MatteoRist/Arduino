@@ -23,7 +23,6 @@
 #include "networking.h"
 
 uint32_t lastReceivedMasterTime_ms = 0;
-const uint8_t MASTER_IP = 0xB0;
 #define TIMEOUT_TO_DEFAULT 100000
 #define MINIMAL_TX_TO_DEFAULT 8
 
@@ -58,7 +57,7 @@ void setup()
     while (true);                
   }
 
-  localAddress = 0xB1;
+  localAddress = SLAVE_IP;
   init_LoRa(onReceive);
   LoRa.receive();
 
@@ -77,11 +76,14 @@ void loop()
   static uint32_t txInterval_ms = TX_LAPSE_MS;
   static uint32_t tx_begin_ms = 0;
   static uint8_t flags = 0;
+  static bool gotMsg = false;
 
   uint8_t masterFlags = 0;
   if(loraConfigPackeSize){
     uint8_t readPointer = loraConfigPacketRead;
-    masterFlags = loraConfigPacketFIFO[readPointer].flags;
+    if(loraConfigPacketFIFO[loraConfigPacketRead].sender == MASTER_IP){
+      masterFlags = loraConfigPacketFIFO[loraConfigPacketRead].flags;
+    }
     // if(loraConfigPacketFIFO[readPointer].incomingLength == 4){
       remoteNodeConf.bandwidth_index = loraConfigPacketFIFO[readPointer].data[0] >> 4;
       remoteNodeConf.spreadingFactor = 6 + ((loraConfigPacketFIFO[readPointer].data[0] & 0x0F) >> 1);
@@ -99,11 +101,14 @@ void loop()
       printFlags(masterFlags);    
       LoRaPacketContentPrint(readPointer);
     #endif
+    Serial.print("Flags received ");
+    printFlags(masterFlags);
     if(loraConfigPacketFIFO[readPointer].sender == MASTER_IP){
       lastReceivedMasterTime_ms = millis();
     }
     loraConfigPacketRead = (loraConfigPacketRead+1) % LORA_CONFIG_PACKET_BUFFER_SIZE;
     loraConfigPackeSize--;
+    gotMsg = true;
   }
 
 
@@ -128,9 +133,6 @@ void loop()
         uint8_t copyMasterFlags = masterFlags;
         masterFlags = 0;
 
-        if(copyMasterFlags & LOOSING_DATA_FLAG) {
-            loosingData = true;
-        }
 
         if(copyMasterFlags & CONFIG_CHANGE_FLAG) {
             if(copyMasterFlags & CONFIG_NOT_ACCEPTED){
@@ -139,61 +141,49 @@ void loop()
               thisNodeConf = nextConfig;
             }else{
               nextConfig = remoteNodeConf;
-              startProbing(txInterval_ms, msgCount, flags);
+              flags = CONFIG_CHANGE_FLAG | flags;
             }
             
       }
 
-      if(copyMasterFlags & INSTABLE_FLAG){
-        flags = flags | INSTABLE_FLAG_ACK;
-      }
 
   }
 
       
-  if (!transmitting && ((millis() - lastSendTime_ms) > txInterval_ms)) {
+  if (!transmitting && gotMsg && ((millis() - lastSendTime_ms) > txInterval_ms)) {
+    Serial.print("i am here");
+    gotMsg = false;
+    if(!(mode == PROBING && (flags & CONFIG_NOT_ACCEPTED))){
+      uint8_t payload[50];
+      uint8_t payloadLength = 0;
 
-    uint8_t payload[50];
-    uint8_t payloadLength = 0;
+      payload[payloadLength]    = (thisNodeConf.bandwidth_index << 4);
+      payload[payloadLength++] |= ((thisNodeConf.spreadingFactor - 6) << 1);
+      payload[payloadLength]    = ((thisNodeConf.codingRate - 5) << 6);
+      payload[payloadLength++] |= ((thisNodeConf.txPower - 2) << 1);
 
-    payload[payloadLength]    = (thisNodeConf.bandwidth_index << 4);
-    payload[payloadLength++] |= ((thisNodeConf.spreadingFactor - 6) << 1);
-    payload[payloadLength]    = ((thisNodeConf.codingRate - 5) << 6);
-    payload[payloadLength++] |= ((thisNodeConf.txPower - 2) << 1);
+      // Incluimos el RSSI y el SNR del último paquete recibido
+      // RSSI puede estar en un rango de [0, -127] dBm
+      payload[payloadLength++] = uint8_t(-LoRa.packetRssi() * 2);
+      // SNR puede estar en un rango de [20, -148] dBm
+      payload[payloadLength++] = uint8_t(148 + LoRa.packetSnr());
+      payloadLength = 4;
+      
+      if(sendMessage(payload, payloadLength, msgCount, flags, !(flags & CONFIG_CHANGE_FLAG))){
+      Serial.print(!(flags & CONFIG_CHANGE_FLAG));
+      transmitting = true;
+      txDoneFlag = (flags & CONFIG_CHANGE_FLAG);
+      tx_begin_ms = millis() - theoreticalTimeOnAir*(!!(flags & CONFIG_CHANGE_FLAG)); 
 
-    // Incluimos el RSSI y el SNR del último paquete recibido
-    // RSSI puede estar en un rango de [0, -127] dBm
-    payload[payloadLength++] = uint8_t(-LoRa.packetRssi() * 2);
-    // SNR puede estar en un rango de [20, -148] dBm
-    payload[payloadLength++] = uint8_t(148 + LoRa.packetSnr());
-    payloadLength = 4;
-    
-    if(sendMessage(payload, payloadLength, msgCount, flags)){
-    
-    transmitting = true;
-    txDoneFlag = false;
-    tx_begin_ms = millis();
-
-    Serial.print("Sending packet ");
-    Serial.print(msgCount++);
-    Serial.print(" flags sent ");
-    printFlags(flags);
-    Serial.print(": ");
-    printBinaryPayload(payload, payloadLength);}
-    else{
-      Serial.println("\nBlad wysyłania pakietu!!!!!");
-    }
-    if(flags & INSTABLE_FLAG_ACK){
-      mode = PROBING;
-      flags = 0;
-      msgCount = 0;
-      revertConfig(msgCount, flags);
-    }
-    if (mode == INSTABLE){
-      mode = STABLE;
-      flags = 0;
-      msgCount = 0;
-      revertConfig(msgCount, flags);
+      Serial.print("Sending packet ");
+      Serial.print(msgCount++);
+      Serial.print(" flags sent ");
+      printFlags(flags);
+      Serial.print(": ");
+      printBinaryPayload(payload, payloadLength);}
+      else{
+        Serial.println("\nBlad wysyłania pakietu!!!!!");
+      }
     }
   } 
 
@@ -201,23 +191,30 @@ void loop()
   TX ended logic
   -----------------------------------------------------------*/
 
+
+  if (transmitting && txDoneFlag) {
+
+    onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive, flags);
+
+    if (digitalRead(LORA_DEFAULT_DIO0_PIN) == HIGH){
+      Serial.println("\n----------->[BUG] LORA DIO0 PIN should be low");
+      resetRadio(onReceive);
+    }
+    transmitting = false;
+    if(flags & CONFIG_CHANGE_FLAG){
+      startProbing(txInterval_ms, msgCount, flags);
+      txInterval_ms = 0;
+    }
+    // Reactivamos la recepción de mensajes, que se desactiva
+    // en segundo plano mientras se transmite
+    LoRa.receive();   
+  }
   // hardware bug fix
   if(transmitting && millis() - tx_begin_ms > theoreticalTimeOnAir*1.5){
       Serial.print("\n----------->[BUG] Sending time is too long txTime: ");Serial.print(millis() - tx_begin_ms); Serial.print("  should be max: "); Serial.println(theoreticalTimeOnAir);
       init_LoRa(onReceive);
       txDoneFlag = true;
       // flags = flags | CONFIG_NOT_ACCEPTED;
-  }
-
-  if (transmitting && txDoneFlag) {
-
-    onTXCommon(tx_begin_ms ,lastSendTime_ms, txInterval_ms, onReceive, flags);
-    
-    transmitting = false;
-    
-    // Reactivamos la recepción de mensajes, que se desactiva
-    // en segundo plano mientras se transmite
-    LoRa.receive();   
   }
 }
 

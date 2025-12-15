@@ -3,6 +3,8 @@
 
 #define TX_LAPSE_MS          10000
 
+const uint8_t MASTER_IP = 0xB0;
+const uint8_t SLAVE_IP = 0xB1;
 uint8_t localAddress; 
 uint8_t destination = 0xFF;           
 
@@ -20,7 +22,7 @@ typedef struct {
 double bandwidth_kHz[10] = {7.8E3, 10.4E3, 15.6E3, 20.8E3, 31.25E3,
                             41.7E3, 62.5E3, 125E3, 250E3, 500E3 };
 
-LoRaConfig_t defaultConfig = { 7, 9, 5, 2};
+LoRaConfig_t defaultConfig = { 7, 9, 8, 2};
 LoRaConfig_t thisNodeConf   = defaultConfig;
 LoRaConfig_t remoteNodeConf = { 0,  0, 0, 0};
 int remoteRSSI = 0;
@@ -28,7 +30,7 @@ float remoteSNR = 0;
 
 //--------------------------NEW THINGS-------------------------------
 
-enum Mode {STABLE, PROBING, INSTABLE};
+enum Mode {STABLE, PRE_PROBING ,PROBING, INSTABLE};
 Mode mode = STABLE;
 
 #define TX_INTERVAL_BEFORE_PROBING 5
@@ -45,8 +47,8 @@ int txIntervals = 0;
 
 
 
-#define RSSI_THRESHOLD -95
-#define RSSI_THRESHOLD_UPPER -50
+#define RSSI_THRESHOLD -105
+#define RSSI_THRESHOLD_UPPER -70
 const float SNR_THRESHOLD[] = {-2.5, -4, -6.5, -9, -11.5, -13};
 #define SNR_THRESHOLD_UPPER 7.5
 
@@ -95,9 +97,10 @@ typedef void (*LoRaReceiveCallback)(int);
 bool init_LoRa(LoRaReceiveCallback onReceive);
 
 // sendinf and getting
-bool sendMessage(uint8_t* payload, uint8_t payloadLength, uint16_t msgCount, uint8_t flags);
+bool sendMessage(uint8_t* payload, uint8_t payloadLength, uint16_t msgCount, uint8_t flags, uint8_t async);
 void TxFinished();
 
+inline bool operator==(const LoRaConfig_t& a, const LoRaConfig_t& b);
 
 // debbuging
 void printBinaryPayload(uint8_t * payload, uint8_t payloadLength);
@@ -107,7 +110,7 @@ void printFlags(uint8_t flags);
 // Sending message function
 // --------------------------------------------------------------------
 
-bool sendMessage(uint8_t* payload, uint8_t payloadLength, uint16_t msgCount, uint8_t flags) 
+bool sendMessage(uint8_t* payload, uint8_t payloadLength, uint16_t msgCount, uint8_t flags, uint8_t async) 
 {
   LoRa.idle();
   if(!LoRa.beginPacket()) {            // Comenzamos el empaquetado del mensaje
@@ -120,7 +123,7 @@ bool sendMessage(uint8_t* payload, uint8_t payloadLength, uint16_t msgCount, uin
   LoRa.write(flags);
   LoRa.write(payloadLength);              // Añadimos la longitud en bytes del mensaje
   LoRa.write(payload, (size_t)payloadLength); // Añadimos el mensaje/payload 
-  LoRa.endPacket(true);                   
+  LoRa.endPacket(async);                   
 
   theoreticalTimeOnAir = getTimeOnAirBytes(payloadLength+6);
   Serial.print("Theory time on Air:  "); Serial.println(theoreticalTimeOnAir);
@@ -173,40 +176,43 @@ void printFlags(uint8_t flags) {
 Apply new config
 --------------------------------------------------------------*/
 bool applyConfig(const LoRaConfig_t conf, bool check_difference_and_apply_difference) {
-  bool configChanged = false;
   if(!check_difference_and_apply_difference){
-    configChanged = true;
     LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
     LoRa.setSpreadingFactor(conf.spreadingFactor);
     LoRa.setCodingRate4(conf.codingRate);
     LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
+    updateTimingParameters(conf);
   }else{
     if(conf.bandwidth_index != thisNodeConf.bandwidth_index){
       LoRa.setSignalBandwidth(long(bandwidth_kHz[conf.bandwidth_index]));
-      configChanged = true;
     }
     if(conf.spreadingFactor != thisNodeConf.spreadingFactor){
       LoRa.setSpreadingFactor(conf.spreadingFactor);
-      configChanged = true;
     }
     if(conf.codingRate != thisNodeConf.codingRate){
       LoRa.setCodingRate4(conf.codingRate);
-      configChanged - true;
     }
     if(conf.txPower != thisNodeConf.txPower){
       LoRa.setTxPower(conf.txPower, PA_OUTPUT_PA_BOOST_PIN);
-      configChanged = true;
     }
   }
   
   
   // LoRa.setSyncWord(0x12);
   // LoRa.setPreambleLength(50);
-  if(configChanged){
-    Serial.print("\nApplied Config -> SF:"); Serial.print(conf.spreadingFactor);
-    Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
-    Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate); Serial.println();
+  bool configChanged = false;
+  if(!(thisNodeConf == conf)){
+    configChanged = true;
     updateTimingParameters(conf);
+    if(!(conf == defaultConfig)){
+      Serial.print("Applied Config -> SF:"); Serial.print(conf.spreadingFactor);
+      Serial.print(" BW_IDX:"); Serial.print(conf.bandwidth_index);
+      Serial.print("  CODING_RATE  "); Serial.println(conf.codingRate);
+    }else{
+      Serial.println("Applied basic config");
+      
+    }
+    
   }
   return configChanged;
 
@@ -260,22 +266,21 @@ Calculating theory time in tx
 --------------------------------------------------------------*/
 
 void updateTimingParameters(const LoRaConfig_t& conf) {
-    // 1. czas trwania symbolu (Ts) w ms
+    // symbol time
     double bw_hz = bandwidth_kHz[conf.bandwidth_index];
     symbol_duration_ms = (pow(2, conf.spreadingFactor) / bw_hz) * 1000.0;
 
-    // 2. Low Data Rate Optimization
+
     ldro_enabled = (symbol_duration_ms > 16.0);
 
-    // 3. Czas preambuły
+
     header_preamble_time_ms = (PREAMBLE_LEN + 4.25) * symbol_duration_ms;
 
-    // 4. Skuteczny coding rate
-    cr_eff = conf.codingRate; // przechowujemy raz, użyjemy później
+
+    cr_eff = conf.codingRate;
 }
 
 uint32_t getTimeOnAirBytes(uint8_t payloadLength) {
-    // ... (definitions and checks)
 
     int de = ldro_enabled ? 1 : 0;
     int H = 0;          // Explicit header (Assumed 0 for Explicit, 1 for Implicit)
@@ -311,7 +316,7 @@ bool init_LoRa(LoRaReceiveCallback onReceive){
       Serial.println("LoRa init failed. Check your connections.");            
     }
     applyConfig(thisNodeConf, false);
-    LoRa.setSyncWord(0x12);      
+    LoRa.setSyncWord(0x25);      
 
     LoRa.setPreambleLength(8);     
 
@@ -329,7 +334,7 @@ bool resetRadio(LoRaReceiveCallback onReceive)
 {
     if(millis() - LoRaLastRestart_timestamp > LORA_MINIMUM_TIME_BETWEEN_RESTARTS){
     bool resetWorked = LoRa.reset(868E6);
-    LoRa.setSyncWord(0x12);  
+    LoRa.setSyncWord(0x25);  
     LoRa.setPreambleLength(8);
     applyConfig(thisNodeConf, false);
     LoRa.onReceive(onReceive);
@@ -346,7 +351,7 @@ bool resetRadio(LoRaReceiveCallback onReceive)
 Receiving logic
 -------------------------------*/
 
-#define RECEIVE_DEBUG_PRINT_ON
+// #define RECEIVE_DEBUG_PRINT_ON
 #ifdef RECEIVE_DEBUG_PRINT_ON
     #define RECEIVE_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)
     #define RECEIVE_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
@@ -409,9 +414,9 @@ void inline onReceiveCommon(int packetSize){
     loraConfigPacketFIFO[next].sender = sender;
     loraConfigPacketFIFO[next].incomingMsgId = incomingMsgId;
     loraConfigPacketFIFO[next].flags = LoRa.read();
-    loraConfigPacketFIFO[next].incomingLength = LoRa.read();
+    loraConfigPacketFIFO[next].incomingLength = min(LoRa.read(),6);
     uint8_t receivedBytes = 0; 
-    while (LoRa.available() && (receivedBytes < uint8_t(sizeof(LORA_CONFIG_PACKET_BUFFER_SIZE)-1))) {            
+    while (LoRa.available() && (receivedBytes < LORA_CONFIG_PACKET_BUFFER_SIZE-1)) {            
       loraConfigPacketFIFO[next].data[receivedBytes++] = LoRa.read();
     }
     int packetRssi = LoRa.packetRssi();
@@ -478,29 +483,30 @@ Mode logic
 ----------------------------------------------*/
 
 void inline probingModeLogic(uint8_t &flags, uint16_t &msgCount, uint8_t &otherFlags){
+    if((flags & CONFIG_NOT_ACCEPTED) != 0){
+        mode = STABLE;
+        flags = 0;
+        revertConfig(msgCount, flags);
+        Serial.println("---------->[LOG] new config not accepted");
+        return;
+    }
     if ((otherFlags & CONFIG_NOT_ACCEPTED) || millis() - lastReceivedTime_ms > (probingPlannedTime/PROBING_PLANNED_TX_INTERVALS)*2) {
         if(flags & CONFIG_NOT_ACCEPTED == 0){
-        Serial.print("\n[CRITICAL] Connection lost! No data received for ");
+        Serial.print("\n--------->[CRITICAL] Connection lost! No data received for ");
         Serial.print(probingPlannedTime);
         Serial.println(" ms. Increasing reverting to last config after timeout.");
         }
         flags = flags | CONFIG_NOT_ACCEPTED;
     }
-
-    if((millis() - probingStarted) > probingPlannedTime){
+    if(((flags & CONFIG_NOT_ACCEPTED) == 0) && (millis() - probingStarted) > probingPlannedTime){
       Serial.print(flags & CONFIG_NOT_ACCEPTED);
-      if((flags & CONFIG_NOT_ACCEPTED) == 0){
-        mode = STABLE;
-        flags = 0;
-        Serial.println("[LOG] Accepted new config");
-      } else{
-        Serial.println("[LOG] new config not accepted");
-        revertConfig(msgCount, flags);
-        mode = STABLE;
-        flags = 0;
-        msgCount = 0;
-      }
+      Serial.println("---------->[LOG] Accepted new config");
+      mode = STABLE;
+      flags = 0;
+      msgCount = 0;
     }
+    
+
 }
 
 void inline startProbing(uint32_t &txInterval_ms, uint16_t &msgCount, uint8_t &flags){
@@ -523,27 +529,24 @@ void inline startProbing(uint32_t &txInterval_ms, uint16_t &msgCount, uint8_t &f
   /*-----------------------------------------------------------
   TX ended logic
   -----------------------------------------------------------*/
+#define DUTY_CYCLE 40
 
 void inline onTXCommon(uint32_t &tx_begin_ms, uint32_t &lastSendTime_ms, uint32_t &txInterval_ms, LoRaReceiveCallback onReceive, uint8_t &flags){
     uint32_t TxTime_ms = min(millis() - tx_begin_ms, theoreticalTimeOnAir);
 
-    // if (digitalRead(LORA_DEFAULT_DIO0_PIN) == HIGH){
-      // Serial.println("\n----------->[BUG] LORA DIO0 PIN should be low");
-      // resetRadio(onReceive);
-      // flags = flags | CONFIG_NOT_ACCEPTED;
-    // }
     
-    Serial.print("----> TX completed in ");
-    Serial.print(TxTime_ms);
-    Serial.println(" msecs");
+    
+    // Serial.print("----> TX completed in ");
+    // Serial.print(TxTime_ms);
+    // Serial.println(" msecs");
     
     // Ajustamos txInterval_ms para respetar un duty cycle del 1% 
     uint32_t lapse_ms = tx_begin_ms - lastSendTime_ms;
     lastSendTime_ms = tx_begin_ms; 
-    float duty_cycle = (100.0f * TxTime_ms) / lapse_ms;
+    float duty_cycle = (1.0 * DUTY_CYCLE * TxTime_ms) / lapse_ms;
     
-    Serial.print("Duty cycle: ");
-    Serial.print(duty_cycle, 1);
-    Serial.println(" %\n");
-    txInterval_ms = TxTime_ms * 100;
+    // Serial.print("Duty cycle: ");
+    // Serial.print(duty_cycle, 1);
+    // Serial.println(" %\n");
+    txInterval_ms = TxTime_ms * DUTY_CYCLE;
 }
