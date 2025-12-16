@@ -36,7 +36,7 @@ uint32_t lastReceivedMasterTime_ms = 0;
 void setup() 
 {
   Serial.begin(115200);  
-  while (!Serial); 
+  // while (!Serial); 
 
   Serial.println("LoRa Duplex with TxDone and Receive callbacks");
   Serial.println("Using binary packets");
