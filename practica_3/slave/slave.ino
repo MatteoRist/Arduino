@@ -144,8 +144,12 @@ void loop()
             }else{
               nextConfig = remoteNodeConf;
               flags = CONFIG_CHANGE_FLAG | flags;
-            }
-            
+            } 
+      } else if(copyMasterFlags == CONFIG_NOT_ACCEPTED){
+        mode = STABLE;
+        flags = 0;
+        revertConfig(msgCount, flags);
+        Serial.println("---------->[LOG] new config not accepted");
       }
 
 

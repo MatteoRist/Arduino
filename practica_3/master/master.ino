@@ -256,11 +256,11 @@ void inline optimizeConfig(uint8_t &flags){
           if(lowSnr){
             if(thisNodeConf.spreadingFactor < 12){
               nextConfig.spreadingFactor ++;
-            }
-            flags = CONFIG_CHANGE_FLAG; 
-            if(thisNodeConf.bandwidth_index > 0){
+            } else if(thisNodeConf.bandwidth_index > 0){
               nextConfig.bandwidth_index--;
             }
+            flags = CONFIG_CHANGE_FLAG; 
+
           } else if(lowerTXPower){
             flags = CONFIG_CHANGE_FLAG; nextConfig.txPower--;
 
@@ -269,15 +269,15 @@ void inline optimizeConfig(uint8_t &flags){
             nextConfig.bandwidth_index++;
             nextConfig.spreadingFactor = max(7, thisNodeConf.spreadingFactor-1);
           }
-          else if(thisNodeConf.spreadingFactor != 7 && last_packet_SNR > SNR_THRESHOLD[thisNodeConf.spreadingFactor-8]){
+          else if(thisNodeConf.spreadingFactor != 7 && last_packet_SNR > SNR_THRESHOLD[thisNodeConf.spreadingFactor-8]+1){
             flags = CONFIG_CHANGE_FLAG; nextConfig.spreadingFactor--;
           }
-          else if(thisNodeConf.bandwidth_index != 9 && last_packet_SNR > SNR_THRESHOLD[thisNodeConf.spreadingFactor-7] + 3){
+          else if(thisNodeConf.bandwidth_index != 9 && last_packet_SNR > SNR_THRESHOLD[thisNodeConf.spreadingFactor-7] + 4){
             flags = CONFIG_CHANGE_FLAG; nextConfig.bandwidth_index++;
           }
           else if (thisNodeConf.codingRate != 5){
             flags = CONFIG_CHANGE_FLAG; nextConfig.codingRate--;
-          }else if (thisNodeConf.txPower != 2){
+          }else if (thisNodeConf.txPower != 2 && last_packet_RSSI > RSSI_THRESHOLD + 5 && SNR_THRESHOLD[thisNodeConf.spreadingFactor-7] + 3){
             flags = CONFIG_CHANGE_FLAG; nextConfig.txPower--;
           }else {
             txIntervals = 0;
